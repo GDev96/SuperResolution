@@ -34,10 +34,10 @@ Un progetto di intelligenza artificiale per il miglioramento della risoluzione d
 - procurare le immagini e provare ad aprirle su python
 
 ### 🔴 Priorità Alta
-- [ ] **Setup ambiente di sviluppo**
-  - [ ] Installazione Python 3.8+
-  - [ ] Setup virtual environment
-  - [ ] Installazione dipendenze (PyTorch, OpenCV, PIL)
+- [x] **Setup ambiente di sviluppo**
+  - [x] Installazione Python 3.8+
+  - [x] Setup virtual environment
+  - [x] Installazione dipendenze (PyTorch, OpenCV, PIL)
   
 - [ ] **Raccolta e preparazione dataset**
   - [ ] Download dataset DIV2K
