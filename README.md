@@ -40,7 +40,7 @@ Un progetto di intelligenza artificiale per il miglioramento della risoluzione d
   - [x] Installazione dipendenze (PyTorch, OpenCV, PIL)
   
 - [ ] **Raccolta e preparazione dataset**
-  - [ ] Acquisizione immagini da osservatorio locale
+  - [ ] Acquisizione immagini da osservatorio Schiaparelli
   - [ ] Download immagini dalla galleria Hubble online
   - [ ] Implementazione algoritmi di registrazione immagini (astroalign)
   - [ ] Allineamento e calibrazione immagini astronomiche
@@ -123,6 +123,32 @@ pip freeze > requirements.txt
 # Installazione nuove dipendenze e aggiornamento requirements
 pip install nome_pacchetto
 pip freeze > requirements.txt
+```
+
+### Avvio del progetto
+
+```bash
+# Attivazione dell'ambiente virtuale
+python -m venv venv
+source venv/bin/activate     # su Linux/macOS
+venv\Scripts\activate        # su Windows
+
+# Installazione delle dipendenze (solo al primo avvio sulla macchina)
+pip install -r requirements.txt
+```
+
+#### Impostare l'interpreta Python
+- Apri la Command Palette (Ctrl+Shift+P o Cmd+Shift+P su Mac)
+- Cerca e seleziona: Python: Select Interpreter
+- Scegli quello che punta al tuo ./venv (ambiente appena creato)
+
+#### Esecuzione dello script di allineamento
+```bash
+python scripts/align_images.py \
+  --ref data/img_hubble/ref_image.fits \
+  --target_dir data/img_Schiaparelli \
+  --output_dir data/img_output
+
 ```
 
 ---
