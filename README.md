@@ -40,10 +40,13 @@ Un progetto di intelligenza artificiale per il miglioramento della risoluzione d
   - [x] Installazione dipendenze (PyTorch, OpenCV, PIL)
   
 - [ ] **Raccolta e preparazione dataset**
-  - [ ] Download dataset DIV2K
-  - [ ] Download dataset Set5/Set14 per testing
-  - [ ] Implementazione data loader
-  - [ ] Preprocessing pipeline (cropping, normalization)
+  - [ ] Acquisizione immagini da osservatorio locale
+  - [ ] Download immagini dalla galleria Hubble online
+  - [ ] Implementazione algoritmi di registrazione immagini (astroalign)
+  - [ ] Allineamento e calibrazione immagini astronomiche
+  - [ ] Valutazione qualità registrazione e correzione artefatti
+  - [ ] Implementazione data loader per immagini astronomiche
+  - [ ] Preprocessing pipeline (cropping, normalization, gestione metadati FITS)
 
 ### 🟡 Priorità Media
 - [ ] **Implementazione modello SRCNN**
@@ -90,7 +93,39 @@ Un progetto di intelligenza artificiale per il miglioramento della risoluzione d
 - **Tempo di inferenza**: < 1 secondo per immagine 512x512
 - **Qualità visiva**: Valutazione soggettiva su scala 1-10, target > 7
 
+## 🛠️ Setup Ambiente di Sviluppo
+
+### Creazione e attivazione virtual environment
+
+```bash
+# Creazione virtual environment
+python -m venv venv
+
+# Attivazione su Windows
+venv\Scripts\activate
+
+# Attivazione su Linux/MacOS
+source venv/bin/activate
+
+# Disattivazione (quando necessario)
+deactivate
+```
+
+### Gestione dipendenze
+
+```bash
+# Installazione dipendenze da requirements.txt
+pip install -r requirements.txt
+
+# Aggiornamento requirements.txt con le dipendenze correnti
+pip freeze > requirements.txt
+
+# Installazione nuove dipendenze e aggiornamento requirements
+pip install nome_pacchetto
+pip freeze > requirements.txt
+```
+
 ---
 
-*Ultimo aggiornamento: 23 Luglio 2025*
+*Ultimo aggiornamento: 30 Luglio 2025*
 
