@@ -1,0 +1,1 @@
+Questa cartella conterrà le immagini di input da migliorare
