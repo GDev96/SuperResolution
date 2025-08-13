@@ -45,6 +45,47 @@ def register_images(ref_img, target_img):
     ref_img_norm = normalize_image(ref_img)
     target_img_norm = normalize_image(target_img)
 
+    # Resize target image to match reference image dimensions
+    if target_img_norm.shape != ref_img_norm.shape:
+        target_img_norm = resize(target_img_norm, ref_img_norm.shape, anti_aliasing=True)
+
+    try:
+        aligned_img, _ = aa.register(target_img_norm, ref_img_norm)
+        method = "AstroAlign"
+    except Exception:
+        try:
+            best_confidence = 0
+            best_result = None
+            for size in [150, 200, 250, 300]:
+                try:
+                    shift_x, shift_y, confidence = template_match_alignment(ref_img_norm, target_img_norm, size)
+                    if confidence > best_confidence:
+                        best_confidence = confidence
+                        best_result = (shift_x, shift_y)
+                except:
+                    continue
+            if best_result and best_confidence > 0.5:
+                tform = transform.SimilarityTransform(translation=best_result)
+                aligned_img = transform.warp(target_img_norm, tform.inverse, output_shape=ref_img_norm.shape)
+                method = f"Template Matching (conf: {best_confidence:.3f})"
+            else:
+                raise ValueError("Template Matching failed")
+        except Exception:
+            shift, error, _ = registration.phase_cross_correlation(ref_img_norm, target_img_norm, upsample_factor=100)
+            tform = transform.SimilarityTransform(translation=(-shift[1], -shift[0]))
+            aligned_img = transform.warp(target_img_norm, tform.inverse, output_shape=ref_img_norm.shape)
+            method = f"Phase Correlation (error: {error:.4f})"
+
+    stats = {
+        "correlation": np.corrcoef(ref_img_norm.flatten(), aligned_img.flatten())[0, 1],
+        "mse": np.mean((ref_img_norm - aligned_img)**2),
+        "mae": np.mean(np.abs(ref_img_norm - aligned_img))
+    }
+
+    return aligned_img, method, stats
+    ref_img_norm = normalize_image(ref_img)
+    target_img_norm = normalize_image(target_img)
+
     try:
         aligned_img, _ = aa.register(target_img_norm, ref_img_norm)
         method = "AstroAlign"
