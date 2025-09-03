@@ -1,25 +1,23 @@
-"""
-Script per avviare l'interfaccia utente del progetto Super Resolution
-"""
 import sys
-import os
+from pathlib import Path
 
-# Aggiungi il percorso src al PYTHONPATH
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
+# Aggiungi il percorso src al path
+sys.path.append(str(Path(__file__).parent.parent))
 
-from ui.gradio_interface import SuperResolutionUI
+from ui.gradio_interface import create_interface
 
 def main():
-    print("🌟 Avvio interfaccia Super Resolution...")
-    print("📡 L'interfaccia sarà disponibile su: http://localhost:7860")
-    print("🌐 Link pubblico temporaneo verrà mostrato dopo l'avvio")
-    print("⏹️  Premi Ctrl+C per fermare il server")
+    """Lancia l'interfaccia web"""
+    print("🚀 Avvio interfaccia Super-Risoluzione...")
+    print("📍 L'interfaccia sarà disponibile su: http://localhost:7860")
     
-    ui = SuperResolutionUI()
-    ui.launch(
-        share=True,
+    demo = create_interface()
+    demo.launch(
+        share=False,
+        server_name="0.0.0.0",
         server_port=7860,
         show_error=True,
+        show_api=False,
         quiet=False
     )
 
