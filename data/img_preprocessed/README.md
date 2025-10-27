@@ -1,1 +1,1 @@
-Questa cartella conterrà le immagini allineate pronte per l'elaborazione
+Questa cartella conterrà le immagini allineate pronte per il dataset
