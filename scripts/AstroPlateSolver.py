@@ -23,9 +23,9 @@ from tqdm import tqdm
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 
-INPUT_DIR = 'C:\\Users\\dell\\Desktop\\Super resolution Gaia\\M42\\2_cropped'
-OUTPUT_DIR = 'C:\\Users\\dell\\Desktop\\Super resolution Gaia\\M42\\3_plate'
-LOG_DIR = 'C:\\Users\\dell\\Desktop\\Super resolution Gaia\\logs'
+INPUT_DIR = os.path.join(PROJECT_ROOT, 'data', 'img_cropped_3')   # Da img_cropped_3
+OUTPUT_DIR = os.path.join(PROJECT_ROOT, 'data', 'img_plate_2')    # A img_plate_2
+LOG_DIR = os.path.join(PROJECT_ROOT, 'logs')
 
 # --- CONFIGURAZIONE SIRIL 1.4 ---
 SIRIL_CLI = "C:\\Program Files\\SiriL\\bin\\siril-cli.exe"
