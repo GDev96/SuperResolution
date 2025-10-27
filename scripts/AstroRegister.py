@@ -1,48 +1,44 @@
 """
 AstroRegister.py - Registrazione (Allineamento) con Siril CLI
-Allinea tutte le immagini FITS su una proiezione comune usando le WCS.
-
-METODO 1 (Preferito): Usa il comando 'register' di Siril
-METODO 2 (Fallback): Usa reproject Python con astropy
+FIXED VERSION - Risolve problemi con unità Astropy
 """
 
 import os
+import sys
 import glob
 import time
 import logging
 import subprocess
 import shutil
 from datetime import datetime
+import numpy as np
+import astropy
 from astropy.io import fits
 from astropy.wcs import WCS
-import numpy as np
+from astropy.coordinates import SkyCoord
+import astropy.units as u
 from tqdm import tqdm
 
 # --- CONFIGURAZIONE PERCORSI ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 
-INPUT_DIR = os.path.join(PROJECT_ROOT, 'data', 'img_plate_2')
-OUTPUT_DIR = os.path.join(PROJECT_ROOT, 'data', 'img_register_4')
-LOG_DIR = os.path.join(PROJECT_ROOT, 'logs')
+INPUT_DIR = 'C:\\Users\\dell\\Desktop\\Super resolution Gaia\\M42\\3_plate'
+OUTPUT_DIR = 'C:\\Users\\dell\\Desktop\\Super resolution Gaia\\M42\\4_register'
+LOG_DIR = 'C:\\Users\\dell\\Desktop\\Super resolution Gaia\\logs'
+WORK_DIR = os.path.join(PROJECT_ROOT, 'M42', 'temp_siril_register')
 
 # --- CONFIGURAZIONE SIRIL ---
 SIRIL_CLI = "C:\\Program Files\\SiriL\\bin\\siril-cli.exe"
 
-# --- PARAMETRI DI RIFERIMENTO ---
-M42_RA_CENTER = 83.835
-M42_DEC_CENTER = -5.391
-PIXEL_SCALE_ARCSEC = 0.04
-PIXEL_SCALE_DEG = PIXEL_SCALE_ARCSEC / 3600.0
-FINAL_CANVAS_SHAPE = (4500, 4500)
+# --- CONFIGURAZIONE TEST ---
+MAX_IMAGES = 20  # Riduci per test veloce
 
-# --- CONFIGURAZIONE LOGGING ---
 def setup_logging():
     """Configura il sistema di logging."""
     os.makedirs(LOG_DIR, exist_ok=True)
-    
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_filename = os.path.join(LOG_DIR, f'registration_{timestamp}.log')
+    log_filename = os.path.join(LOG_DIR, f'registration_fixed_{timestamp}.log')
     
     logging.basicConfig(
         level=logging.INFO,
@@ -52,333 +48,399 @@ def setup_logging():
             logging.StreamHandler()
         ]
     )
+    logger = logging.getLogger(__name__)
     
-    return logging.getLogger(__name__)
+    # Log system info
+    logger.info(f"Python version: {sys.version}")
+    logger.info(f"Numpy version: {np.__version__}")
+    logger.info(f"Astropy version: {astropy.__version__}")
+    
+    return logger
 
-def extract_image_number(filename):
-    """Estrae il numero identificativo dal nome del file."""
-    basename = os.path.basename(filename)
-    name_without_ext = os.path.splitext(basename)[0]
-    
-    # Per file plate_image_0a_timestamp.fits
-    if name_without_ext.startswith('plate_image_'):
-        parts = name_without_ext.split('_')
-        if len(parts) >= 3:
-            return parts[2]
-    
-    # Per file standard
-    parts = name_without_ext.split('_')
-    if len(parts) >= 3:
-        return parts[2]
-    
-    return 'unknown'
-
-def generate_output_filename(input_filename):
-    """Genera il nome del file di output: register_image_number_timestamp.fits"""
-    image_number = extract_image_number(input_filename)
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]
-    
-    _, ext = os.path.splitext(input_filename)
-    if not ext:
-        ext = '.fits'
-    
-    return f"register_image_{image_number}_{timestamp}{ext}"
-
-def check_siril_available():
-    """Verifica se Siril CLI è disponibile."""
+def extract_wcs_info_safe(hdu, logger):
+    """Estrae informazioni WCS in modo sicuro evitando errori di unità."""
     try:
-        result = subprocess.run(
-            [SIRIL_CLI, '--version'],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        return result.returncode == 0
-    except:
-        return False
-
-def run_siril_registration(logger):
-    """
-    Esegue registrazione usando Siril CLI.
-    
-    Comandi Siril utilizzati:
-    - convert: converte file FITS in sequenza
-    - register: allinea le immagini usando stelle o WCS
-    - framing: definisce come gestire le dimensioni finali
-    """
-    
-    logger.info("Tentativo registrazione con Siril...")
-    
-    # Crea directory di lavoro temporanea per Siril
-    work_dir = os.path.join(PROJECT_ROOT, 'data', 'temp_siril_register')
-    os.makedirs(work_dir, exist_ok=True)
-    
-    # Script Siril per registrazione
-    siril_script = f"""# Script Siril per Registrazione Immagini
-cd {INPUT_DIR}
-
-# Converti file FITS in sequenza Siril
-# Cerca tutti i file che iniziano con 'plate_image_'
-convert plate_image -out={work_dir}/reg_seq
-
-# Carica la sequenza
-cd {work_dir}
-load reg_seq
-
-# Registrazione delle immagini
-# Opzioni:
-#   -prefix=nome : prefisso per i file output
-#   -framing=max : mantiene tutte le aree comuni (canvas massimo)
-#   -framing=min : ritaglia al minimo comune
-#   -framing=cog : centra sul centro di gravità
-# 
-# Metodi di registrazione:
-#   register reg_seq : registrazione standard usando stelle
-#   register reg_seq -2pass : registrazione a due passaggi (più precisa)
-#   register reg_seq -norot : registra senza rotazione
-
-# Usa registrazione globale per deep-sky con framing massimo
-register reg_seq -framing=max -prefix=r_
-
-# Salva i file registrati nella cartella finale
-savefits {OUTPUT_DIR}/register_image
-
-close
-"""
-    
-    # Salva script temporaneo
-    script_file = os.path.join(work_dir, 'register_script.ssf')
-    with open(script_file, 'w') as f:
-        f.write(siril_script)
-    
-    try:
-        logger.info(f"Esecuzione comando Siril: {SIRIL_CLI} -s {script_file}")
+        wcs = WCS(hdu.header)
         
-        result = subprocess.run(
-            [SIRIL_CLI, '-s', script_file],
-            cwd=work_dir,
-            capture_output=True,
-            text=True,
-            timeout=3600  # 60 minuti timeout
-        )
+        if not wcs.has_celestial:
+            return None, "No celestial coordinates"
         
-        logger.info(f"Output Siril:\n{result.stdout}")
+        # Estrai informazioni base dall'header direttamente
+        header = hdu.header
         
-        if result.returncode == 0:
-            logger.info("Registrazione Siril completata con successo")
+        # Metodo sicuro per ottenere centro
+        try:
+            # Usa pixel al centro dell'immagine
+            center_x = hdu.data.shape[1] / 2.0
+            center_y = hdu.data.shape[0] / 2.0
             
-            # Verifica che ci siano file output
-            output_files = glob.glob(os.path.join(OUTPUT_DIR, 'register_image*.fits'))
-            if output_files:
-                logger.info(f"Trovati {len(output_files)} file registrati")
-                return True, len(output_files)
+            # Converti usando wcs_pix2world (più robusto)
+            world_coords = wcs.wcs_pix2world([[center_x, center_y]], 1)
+            center_ra = float(world_coords[0][0])
+            center_dec = float(world_coords[0][1])
+            
+        except Exception as e:
+            logger.debug(f"Fallback to header values: {e}")
+            # Fallback ai valori dell'header
+            center_ra = float(header.get('CRVAL1', 0))
+            center_dec = float(header.get('CRVAL2', 0))
+        
+        # Calcola scala pixel in modo sicuro
+        try:
+            # Usa CD matrix se disponibile
+            if 'CD1_1' in header and 'CD2_2' in header:
+                cd1_1 = float(header['CD1_1'])
+                cd2_2 = float(header['CD2_2'])
+                pixel_scale_deg = np.sqrt(cd1_1**2 + cd2_2**2)
+            elif 'CDELT1' in header and 'CDELT2' in header:
+                cdelt1 = float(header['CDELT1'])
+                cdelt2 = float(header['CDELT2'])
+                pixel_scale_deg = np.sqrt(cdelt1**2 + cdelt2**2)
             else:
-                logger.warning("Nessun file output trovato dopo registrazione Siril")
-                return False, 0
-        else:
-            logger.warning(f"Registrazione Siril fallita:\n{result.stderr}")
-            return False, 0
+                # Stima predefinita
+                pixel_scale_deg = 0.04 / 3600.0  # 0.04 arcsec/pixel
+                
+            pixel_scale_arcsec = pixel_scale_deg * 3600.0
             
-    except subprocess.TimeoutExpired:
-        logger.error("Timeout durante registrazione Siril (>60 min)")
-        return False, 0
+        except Exception as e:
+            logger.debug(f"Pixel scale fallback: {e}")
+            pixel_scale_arcsec = 0.04
+            pixel_scale_deg = pixel_scale_arcsec / 3600.0
+        
+        info = {
+            'center_ra': center_ra,
+            'center_dec': center_dec,
+            'pixel_scale': pixel_scale_arcsec,
+            'pixel_scale_deg': pixel_scale_deg,
+            'wcs': wcs,
+            'shape': hdu.data.shape
+        }
+        
+        return info, None
+        
     except Exception as e:
-        logger.error(f"Errore esecuzione Siril: {e}")
-        return False, 0
-    finally:
-        # Pulizia file temporanei (opzionale)
-        pass
+        return None, str(e)
 
-def manual_registration_reproject(logger):
-    """
-    METODO FALLBACK: Registrazione manuale usando reproject di astropy.
-    Riproietta tutte le immagini su un WCS target comune.
-    """
+def diagnose_wcs_files_fixed(input_files, logger):
+    """Diagnostica WCS migliorata che evita errori di unità."""
+    logger.info("=" * 60)
+    logger.info("DIAGNOSTICA WCS FIXED")
+    logger.info("=" * 60)
     
-    logger.info("Uso metodo manuale per registrazione (reproject)...")
+    valid_files = []
+    wcs_info = []
+    
+    print("\n🔍 Diagnostica WCS delle immagini (versione corretta)...")
+    
+    for i, filepath in enumerate(input_files):
+        try:
+            with fits.open(filepath) as hdul:
+                # Trova HDU con dati
+                data_hdu = None
+                for hdu_idx, hdu in enumerate(hdul):
+                    if hdu.data is not None:
+                        data_hdu = (hdu_idx, hdu)
+                        break
+                
+                if data_hdu is None:
+                    logger.warning(f"No data in {os.path.basename(filepath)}")
+                    print(f"\n📄 File {i+1}: {os.path.basename(filepath)}")
+                    print(f"   ❌ Nessun dato trovato")
+                    continue
+                
+                hdu_idx, hdu = data_hdu
+                
+                print(f"\n📄 File {i+1}: {os.path.basename(filepath)}")
+                print(f"   Shape: {hdu.data.shape}")
+                print(f"   HDU index: {hdu_idx}")
+                
+                # Estrai info WCS in modo sicuro
+                wcs_data, error = extract_wcs_info_safe(hdu, logger)
+                
+                if wcs_data is None:
+                    print(f"   ❌ WCS Error: {error}")
+                    logger.warning(f"WCS error in {os.path.basename(filepath)}: {error}")
+                    continue
+                
+                print(f"   ✓ WCS: Coordinate celestiali presenti")
+                print(f"   📍 Centro: RA={wcs_data['center_ra']:.3f}°, DEC={wcs_data['center_dec']:.3f}°")
+                print(f"   📏 Scala: {wcs_data['pixel_scale']:.3f} arcsec/pixel")
+                
+                # Aggiungi file e path
+                wcs_data['file'] = filepath
+                wcs_data['hdu_index'] = hdu_idx
+                
+                wcs_info.append(wcs_data)
+                valid_files.append(filepath)
+                
+                logger.info(f"✓ {os.path.basename(filepath)}: "
+                           f"RA={wcs_data['center_ra']:.3f}, DEC={wcs_data['center_dec']:.3f}, "
+                           f"scale={wcs_data['pixel_scale']:.3f}")
+                
+        except Exception as e:
+            print(f"\n📄 File {i+1}: {os.path.basename(filepath)}")
+            print(f"   ❌ Errore file: {e}")
+            logger.error(f"File error {os.path.basename(filepath)}: {e}")
+            continue
+    
+    # Riepilogo
+    print(f"\n📊 RIEPILOGO DIAGNOSTICA:")
+    print(f"   File totali: {len(input_files)}")
+    print(f"   File con WCS valido: {len(valid_files)}")
+    print(f"   File scartati: {len(input_files) - len(valid_files)}")
+    
+    if len(wcs_info) > 0:
+        # Analizza distribuzione coordinate
+        ra_values = [info['center_ra'] for info in wcs_info]
+        dec_values = [info['center_dec'] for info in wcs_info]
+        
+        print(f"\n🎯 DISTRIBUZIONE COORDINATE:")
+        print(f"   RA:  {min(ra_values):.3f}° - {max(ra_values):.3f}° (span: {max(ra_values)-min(ra_values):.3f}°)")
+        print(f"   DEC: {min(dec_values):.3f}° - {max(dec_values):.3f}° (span: {max(dec_values)-min(dec_values):.3f}°)")
+        
+        # Scala pixel
+        scales = [info['pixel_scale'] for info in wcs_info]
+        print(f"   Scala pixel: {min(scales):.3f} - {max(scales):.3f} arcsec/pixel")
+    
+    logger.info(f"Valid files found: {len(valid_files)}/{len(input_files)}")
+    
+    return valid_files, wcs_info
+
+def create_optimal_wcs_fixed(wcs_info, logger):
+    """Crea WCS ottimale usando dati estratti in modo sicuro."""
+    if not wcs_info:
+        return None, None
+    
+    logger.info("Calcolo WCS ottimale...")
+    
+    # Calcola bounds
+    ra_values = [info['center_ra'] for info in wcs_info]
+    dec_values = [info['center_dec'] for info in wcs_info]
+    scales = [info['pixel_scale'] for info in wcs_info]
+    
+    # Centro ottimale
+    center_ra = np.mean(ra_values)
+    center_dec = np.mean(dec_values)
+    
+    # Scala ottimale
+    pixel_scale_arcsec = np.median(scales)
+    pixel_scale_deg = pixel_scale_arcsec / 3600.0
+    
+    # Calcola dimensioni necessarie
+    ra_span = max(ra_values) - min(ra_values)
+    dec_span = max(dec_values) - min(dec_values)
+    
+    # Aggiungi margine del 50% per essere sicuri
+    ra_span *= 1.5
+    dec_span *= 1.5
+    
+    # Calcola dimensioni canvas
+    width_pixels = int(ra_span / pixel_scale_deg) + 1000  # Margine extra
+    height_pixels = int(dec_span / pixel_scale_deg) + 1000
+    
+    # Limiti ragionevoli
+    width_pixels = min(max(width_pixels, 2500), 6000)
+    height_pixels = min(max(height_pixels, 2500), 6000)
+    
+    print(f"\n🎯 WCS OTTIMALE:")
+    print(f"   Centro: RA={center_ra:.3f}°, DEC={center_dec:.3f}°")
+    print(f"   Scala: {pixel_scale_arcsec:.3f} arcsec/pixel")
+    print(f"   Canvas: {width_pixels} x {height_pixels} pixel")
+    print(f"   Span: RA={ra_span:.3f}°, DEC={dec_span:.3f}°")
+    
+    # Crea WCS
+    wcs = WCS(naxis=2)
+    wcs.wcs.crpix = [width_pixels/2, height_pixels/2]
+    wcs.wcs.cdelt = [-pixel_scale_deg, pixel_scale_deg]  # RA decresce verso destra
+    wcs.wcs.crval = [center_ra, center_dec]
+    wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    wcs.wcs.cunit = ["deg", "deg"]
+    
+    logger.info(f"Optimal WCS: center=({center_ra:.3f}, {center_dec:.3f}), "
+               f"scale={pixel_scale_arcsec:.3f}\"/px, size=({width_pixels}, {height_pixels})")
+    
+    return wcs, (height_pixels, width_pixels)
+
+def manual_registration_fixed(logger, input_files):
+    """Registrazione manuale con diagnostica WCS corretta."""
+    logger.info("=" * 50)
+    logger.info("REGISTRAZIONE MANUALE CORRETTA")
+    logger.info("=" * 50)
     
     try:
-        from reproject import reproject_exact
-    except ImportError:
-        logger.error("Libreria 'reproject' non installata. Installa con: pip install reproject")
-        print("\nERRORE: Libreria 'reproject' mancante")
-        print("Installa con: pip install reproject")
+        from reproject import reproject_interp
+        logger.info("Libreria reproject caricata (usando interp)")
+    except ImportError as e:
+        logger.error("Libreria reproject mancante", exc_info=True)
         return False, 0
     
-    input_files = glob.glob(os.path.join(INPUT_DIR, '*.fit')) + \
-                  glob.glob(os.path.join(INPUT_DIR, '*.fits'))
+    # Diagnostica WCS corretta
+    valid_files, wcs_info = diagnose_wcs_files_fixed(input_files, logger)
     
-    if not input_files:
-        logger.error(f"Nessun file trovato in {INPUT_DIR}")
+    if not valid_files:
+        logger.error("Nessun file con WCS valido trovato!")
+        print("❌ Nessun file con WCS valido!")
         return False, 0
     
-    logger.info(f"Trovati {len(input_files)} file da registrare")
+    # Crea WCS ottimale
+    target_wcs, shape_out = create_optimal_wcs_fixed(wcs_info, logger)
     
-    # Crea WCS target
-    logger.info("Creazione WCS target...")
-    target_wcs = WCS(naxis=2)
-    target_wcs.wcs.crpix = [FINAL_CANVAS_SHAPE[1] / 2, FINAL_CANVAS_SHAPE[0] / 2]
-    target_wcs.wcs.cdelt = [-PIXEL_SCALE_DEG, PIXEL_SCALE_DEG]
-    target_wcs.wcs.crval = [M42_RA_CENTER, M42_DEC_CENTER]
-    target_wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    if target_wcs is None:
+        logger.error("Impossibile creare WCS ottimale!")
+        return False, 0
     
-    logger.info(f"WCS Target - CRPIX: {target_wcs.wcs.crpix}")
-    logger.info(f"WCS Target - CRVAL: {target_wcs.wcs.crval}")
-    logger.info(f"Canvas finale: {FINAL_CANVAS_SHAPE}")
+    # Registrazione
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    success_count = 0
+    errors = []
     
-    registered_count = 0
-    error_count = 0
+    print(f"\n🔄 Registrazione di {len(valid_files)} immagini...")
     
-    with tqdm(total=len(input_files), desc="Registrazione Manuale", unit=" file") as pbar:
-        for filename in input_files:
+    with tqdm(total=len(valid_files), desc="Registrazione") as pbar:
+        for filepath in valid_files:
             try:
-                with fits.open(filename, ignore_missing_end=True) as hdul:
-                    input_hdu = hdul[0]
+                filename = os.path.basename(filepath)
+                pbar.set_description(f"Reg: {filename[:30]}")
+                
+                with fits.open(filepath) as hdul:
+                    # Trova HDU con dati (usa info dalla diagnostica)
+                    hdu_info = next((info for info in wcs_info if info['file'] == filepath), None)
+                    if hdu_info is None:
+                        continue
                     
-                    # Verifica WCS
-                    try:
-                        input_wcs = WCS(input_hdu.header)
-                        if not input_wcs.has_celestial:
-                            raise Exception("WCS non valido o mancante")
-                    except Exception as wcs_error:
-                        raise Exception(f"WCS non valido: {wcs_error}")
+                    hdu_idx = hdu_info['hdu_index']
+                    data_hdu = hdul[hdu_idx]
                     
-                    # Esegui riproiezione
-                    logger.debug(f"Riproiezione di {os.path.basename(filename)}...")
-                    aligned_array, footprint = reproject_exact(
-                        input_hdu,
+                    # Reproietta con reproject_interp
+                    logger.debug(f"Reproiezione {filename}...")
+                    reprojected_data, footprint = reproject_interp(
+                        data_hdu,
                         target_wcs,
-                        shape_out=FINAL_CANVAS_SHAPE,
+                        shape_out=shape_out
                     )
                     
-                    # Verifica pixel validi
-                    valid_pixels = np.count_nonzero(~np.isnan(aligned_array))
-                    logger.debug(f"Pixel validi: {valid_pixels}/{FINAL_CANVAS_SHAPE[0]*FINAL_CANVAS_SHAPE[1]}")
+                    # Verifica risultato
+                    if reprojected_data is None:
+                        logger.warning(f"Reproiezione fallita per {filename}")
+                        continue
                     
-                    if valid_pixels == 0:
-                        raise Exception("Nessun pixel valido dopo riproiezione")
+                    # Analizza copertura
+                    valid_mask = ~np.isnan(reprojected_data)
+                    valid_pixels = np.sum(valid_mask)
+                    total_pixels = reprojected_data.size
+                    coverage = (valid_pixels / total_pixels) * 100
                     
-                    # Crea HDU con WCS target
-                    aligned_hdu = fits.PrimaryHDU(aligned_array, target_wcs.to_header())
+                    if coverage < 1.0:  # Almeno 1% di copertura
+                        logger.warning(f"Skip {filename}: copertura troppo bassa ({coverage:.1f}%)")
+                        continue
                     
-                    # Salva con nuovo nome
-                    output_filename = generate_output_filename(filename)
-                    output_filepath = os.path.join(OUTPUT_DIR, output_filename)
-                    aligned_hdu.writeto(output_filepath, overwrite=True, output_verify='warn')
+                    # Sostituisci NaN con zero
+                    reprojected_data = np.nan_to_num(reprojected_data, nan=0.0)
                     
-                    registered_count += 1
-                    logger.debug(f"Salvato: {output_filename}")
+                    # Crea header
+                    new_header = target_wcs.to_header()
+                    
+                    # Copia metadati importanti
+                    important_keys = ['OBJECT', 'DATE-OBS', 'EXPTIME', 'FILTER', 
+                                    'INSTRUME', 'TELESCOP', 'OBSERVER']
+                    
+                    for key in important_keys:
+                        if key in data_hdu.header:
+                            new_header[key] = data_hdu.header[key]
+                    
+                    # Aggiungi metadati registrazione
+                    new_header['REGMTHD'] = 'reproject_interp'
+                    new_header['REGSRC'] = filename
+                    new_header['REGDATE'] = datetime.now().isoformat()
+                    new_header['REGCOVER'] = coverage
+                    new_header['REGPIXEL'] = valid_pixels
+                    
+                    # Salva
+                    output_filename = f"register_{os.path.splitext(filename)[0]}_{datetime.now().strftime('%H%M%S')}.fits"
+                    output_path = os.path.join(OUTPUT_DIR, output_filename)
+                    
+                    fits.PrimaryHDU(
+                        data=reprojected_data.astype(np.float32),
+                        header=new_header
+                    ).writeto(output_path, overwrite=True)
+                    
+                    success_count += 1
+                    logger.info(f"✓ {filename}: copertura {coverage:.1f}%, {valid_pixels:,} pixel validi")
+                    pbar.set_description(f"✓ {success_count} registrate")
                     
             except Exception as e:
-                logger.error(f"Errore registrazione {os.path.basename(filename)}: {e}")
-                tqdm.write(f"ERRORE: {os.path.basename(filename)}: {e}")
-                error_count += 1
+                error_msg = f"Errore {os.path.basename(filepath)}: {str(e)}"
+                logger.error(error_msg, exc_info=True)
+                errors.append(error_msg)
+                pbar.set_description(f"❌ Errore: {os.path.basename(filepath)}")
             
             pbar.update(1)
     
-    logger.info(f"Registrazione completata: {registered_count}/{len(input_files)} file")
-    logger.info(f"File con errori: {error_count}")
+    # Riepilogo
+    print(f"\n📊 RISULTATI REGISTRAZIONE:")
+    print(f"   File processati: {len(valid_files)}")
+    print(f"   Registrati con successo: {success_count}")
+    print(f"   Errori: {len(errors)}")
     
-    return registered_count > 0, registered_count
+    if errors:
+        logger.error("\nERRORI:")
+        for err in errors[:5]:  # Mostra solo primi 5
+            logger.error(err)
+        if len(errors) > 5:
+            logger.error(f"... e altri {len(errors)-5} errori")
+    
+    logger.info(f"Registrazione completata: {success_count}/{len(valid_files)}")
+    return success_count > 0, success_count
 
-# -----------------------------------------------------------
-# FLUSSO PRINCIPALE
-# -----------------------------------------------------------
 def run_registration():
-    """
-    Esegue la registrazione usando prima Siril, poi fallback manuale se necessario.
-    """
-    
+    """Funzione principale di registrazione."""
     logger = setup_logging()
     logger.info("=" * 60)
-    logger.info("ASTRO REGISTER - ALLINEAMENTO IMMAGINI")
+    logger.info(f"ASTRO REGISTER - FIXED VERSION ({MAX_IMAGES} immagini)")
     logger.info("=" * 60)
     
-    os.makedirs(INPUT_DIR, exist_ok=True)
+    print("=" * 70)
+    print("🔭 ASTRO REGISTER - VERSIONE CORRETTA".center(70))
+    print("=" * 70)
+    print(f"Input:  {INPUT_DIR}")
+    print(f"Output: {OUTPUT_DIR}")
+    print(f"Limite: {MAX_IMAGES} immagini")
+    
+    # Setup directories
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     
-    logger.info(f"Cartella input: {os.path.abspath(INPUT_DIR)}")
-    logger.info(f"Cartella output: {os.path.abspath(OUTPUT_DIR)}")
-    logger.info(f"Cartella log: {os.path.abspath(LOG_DIR)}")
-    logger.info(f"Parametri Target - RA: {M42_RA_CENTER}°, DEC: {M42_DEC_CENTER}°")
-    logger.info(f"Scala pixel: {PIXEL_SCALE_ARCSEC} arcsec/pixel")
-    logger.info(f"Canvas finale: {FINAL_CANVAS_SHAPE}")
-    
-    # Verifica disponibilità file
-    input_files = glob.glob(os.path.join(INPUT_DIR, '*.fit')) + \
-                  glob.glob(os.path.join(INPUT_DIR, '*.fits'))
+    # Get input files
+    all_files = glob.glob(os.path.join(INPUT_DIR, '*.fit*'))
+    input_files = sorted(all_files)[:MAX_IMAGES]
     
     if not input_files:
-        error_msg = f"Nessun file FITS trovato in {INPUT_DIR}"
-        logger.error(error_msg)
-        print(f"\nERRORE: {error_msg}")
-        print("Assicurati di aver eseguito prima AstroPlateSolver.py")
+        logger.error(f"Nessun file trovato in {INPUT_DIR}")
+        print(f"\n❌ Nessun file trovato in {INPUT_DIR}")
         return
     
-    logger.info(f"Trovati {len(input_files)} file da processare")
+    print(f"\n✓ Trovati {len(input_files)} file da processare")
+    logger.info(f"Processing {len(input_files)} files")
     
-    # Verifica disponibilità Siril
-    siril_available = check_siril_available()
+    # Registrazione manuale corretta
+    print(f"\n🔄 Avvio registrazione con diagnostica WCS corretta...")
+    success, count = manual_registration_fixed(logger, input_files)
     
-    if siril_available:
-        logger.info(f"✓ Siril CLI trovato: {SIRIL_CLI}")
-        print("\n--- METODO 1: Registrazione con Siril ---")
-        print("Allineamento automatico delle immagini...\n")
-        
-        success, count = run_siril_registration(logger)
-        
-        if success and count > 0:
-            print(f"\n✓ Registrazione completata con Siril!")
-            print(f"File allineati: {count}")
-            print(f"File salvati in: {os.path.abspath(OUTPUT_DIR)}")
-            logger.info(f"Registrazione Siril completata: {count} file")
-            
-            # Suggerimento per prossimo step
-            print(f"\nLog salvato in: {LOG_DIR}")
-            print("\nPROSSIMO PASSO: Stacking delle immagini registrate")
-            print("Puoi usare Siril per lo stacking finale con il comando 'stack'")
-            return
-        else:
-            print("\n⚠ Registrazione Siril fallita. Uso metodo manuale...")
-            logger.warning("Registrazione Siril fallita, uso metodo manuale")
+    if success:
+        print(f"\n✅ REGISTRAZIONE COMPLETATA!")
+        print(f"📁 {count} immagini registrate salvate in: {OUTPUT_DIR}")
+        print(f"📄 Log dettagliato: {LOG_DIR}")
     else:
-        logger.warning(f"Siril CLI non trovato: {SIRIL_CLI}")
-        print(f"\n⚠ Siril CLI non disponibile in: {SIRIL_CLI}")
-        print("Uso metodo manuale per registrazione...\n")
+        print(f"\n❌ REGISTRAZIONE FALLITA")
+        print(f"📄 Controlla i log per dettagli: {LOG_DIR}")
     
-    # FALLBACK: Metodo manuale
-    print("\n--- METODO 2: Registrazione Manuale (reproject) ---")
-    print("Riproiezione delle immagini su WCS comune...\n")
-    
-    success, count = manual_registration_reproject(logger)
-    
-    if success and count > 0:
-        print(f"\n✓ Registrazione manuale completata!")
-        print(f"File allineati: {count}/{len(input_files)}")
-        print(f"File salvati in: {os.path.abspath(OUTPUT_DIR)}")
-        print("\nNOTA: Per risultati ottimali, configura Siril per registrazione automatica.")
-    else:
-        print("\n❌ Errore durante la registrazione")
-        logger.error("Fallimento sia Siril che metodo manuale")
-        return
-    
-    # Suggerimento per prossimo step
-    print(f"\nLog salvato in: {LOG_DIR}")
-    print("\nPROSSIMO PASSO: Stacking delle immagini registrate")
-    print("Puoi usare Siril, PixInsight o DeepSkyStacker per lo stacking finale.")
-    
-    logger.info("=" * 60)
-    logger.info("ELABORAZIONE COMPLETATA")
-    logger.info("=" * 60)
-
+    logger.info("Elaborazione completata")
 
 if __name__ == "__main__":
+    print("\n🔭 ASTRO REGISTER - VERSIONE CORRETTA")
+    print(f"Limite test: {MAX_IMAGES} immagini\n")
+    
     start_time = time.time()
     run_registration()
-    end_time = time.time()
+    elapsed = time.time() - start_time
     
-    elapsed_time = end_time - start_time
-    print(f"\nTempo totale di esecuzione: {elapsed_time:.2f} secondi")
-    
-    logger = logging.getLogger(__name__)
-    logger.info(f"Tempo totale di esecuzione: {elapsed_time:.2f} secondi")
+    print(f"\n⏱️ Tempo totale: {elapsed:.1f} secondi")

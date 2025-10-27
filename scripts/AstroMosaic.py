@@ -1,31 +1,32 @@
+"""
+HST MOSAIC CREATOR - Script di Stacking (Integrazione)
+Versione aggiornata per compatibilità con nuovo AstroRegister
+"""
+
+import os
+import sys
+import glob
+import time 
+import logging
+import gc
+import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS
 from reproject import reproject_interp
-from reproject.mosaicking import find_optimal_celestial_wcs
-import numpy as np
-import glob
-import os
-import gc
-import time
-import sys
-import logging
 from datetime import datetime
+from tqdm import tqdm
 
 # --- CONFIGURAZIONE PERCORSI ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 
-INPUT_DIR = os.path.join(PROJECT_ROOT, 'data', 'img_register_4')
-OUTPUT_DIR = os.path.join(PROJECT_ROOT, 'data', 'img_preprocessed')
-LOG_DIR = os.path.join(PROJECT_ROOT, 'logs')
+INPUT_DIR = 'C:\\Users\\dell\\Desktop\\Super resolution Gaia\\M42\\4_register'
+OUTPUT_DIR = 'C:\\Users\\dell\\Desktop\\Super resolution Gaia\\M42\\5_mosaic'
+LOG_DIR = 'C:\\Users\\dell\\Desktop\\Super resolution Gaia\\logs'
 
-# --- CONFIGURAZIONE LOGGING ---
 def setup_logging():
-    """
-    Configura il sistema di logging per salvare i log nella cartella logs.
-    """
+    """Configura il sistema di logging."""
     os.makedirs(LOG_DIR, exist_ok=True)
-    
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     log_filename = os.path.join(LOG_DIR, f'mosaic_{timestamp}.log')
     
@@ -37,425 +38,161 @@ def setup_logging():
             logging.StreamHandler()
         ]
     )
+    logger = logging.getLogger(__name__)
     
-    return logging.getLogger(__name__)
+    # Log system info
+    logger.info(f"Python version: {sys.version}")
+    logger.info(f"Numpy version: {np.__version__}")
+    
+    return logger
 
-def print_progress_bar(iteration, total, prefix='', suffix='', decimals=1, 
-                       length=50, fill='█', elapsed_time=None):
-    """
-    Stampa una progress bar nella console
-    """
-    percent = ("{0:." + str(decimals) + "f}").format(100 * (iteration / float(total)))
-    filled_length = int(length * iteration // total)
-    bar = fill * filled_length + '-' * (length - filled_length)
-    
-    time_str = ""
-    if elapsed_time is not None:
-        if elapsed_time < 60:
-            time_str = f" | Tempo: {elapsed_time:.1f}s"
-        else:
-            mins = int(elapsed_time // 60)
-            secs = elapsed_time % 60
-            time_str = f" | Tempo: {mins}m {secs:.0f}s"
-        
-        if iteration > 0:
-            avg_time = elapsed_time / iteration
-            remaining = avg_time * (total - iteration)
-            if remaining < 60:
-                time_str += f" | Rimanente: {remaining:.1f}s"
-            else:
-                mins = int(remaining // 60)
-                secs = remaining % 60
-                time_str += f" | Rimanente: {mins}m {secs:.0f}s"
-    
-    sys.stdout.write(f'\r{prefix} |{bar}| {percent}% {suffix}{time_str}')
-    sys.stdout.flush()
-    
-    if iteration == total:
-        print()
-
-def create_feather_mask(shape, feather_pixels=50):
-    """Crea una maschera con bordi sfumati per il blending"""
-    height, width = shape
-    mask = np.ones(shape, dtype=np.float32)
-    for i in range(feather_pixels):
-        weight = (i + 1) / feather_pixels
-        mask[i, :] *= weight
-        mask[-(i+1), :] *= weight
-        mask[:, i] *= weight
-        mask[:, -(i+1)] *= weight
-    return mask
-
-def create_mosaic(input_pattern=None, output_file=None, combine_function='mean', 
-                  feather_pixels=50, downsample_factor=1, max_dimension=None):
-    """
-    Crea un mosaico da immagini FITS con coordinate WCS
-    
-    Parametri:
-    - input_pattern: pattern per trovare i file (opzionale, usa INPUT_DIR se None)
-    - output_file: percorso del file di output (opzionale, usa OUTPUT_DIR se None)
-    - combine_function: metodo ('mean', 'sum', 'min', 'max', 'first', 'last')
-    - feather_pixels: pixel per sfumamento bordi
-    - downsample_factor: riduce dimensioni di questo fattore (2 = metà dimensioni)
-    - max_dimension: dimensione massima in pixel (es. 8000)
-    """
+def stack_mosaic(combine_function='mean'):
+    """Esegue lo stacking delle immagini registrate."""
     logger = setup_logging()
-    
-    # Configura percorsi se non specificati
-    if input_pattern is None:
-        input_pattern = os.path.join(INPUT_DIR, "*.fits")
-    if output_file is None:
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        output_file = os.path.join(OUTPUT_DIR, f"mosaic_{timestamp}.fits")
-    
-    logger.info("=" * 70)
-    logger.info("HST MOSAIC CREATOR - OTTIMIZZATO")
-    logger.info("=" * 70)
-    logger.info(f"Input pattern: {input_pattern}")
-    logger.info(f"Output file: {output_file}")
-    logger.info(f"Combine method: {combine_function}")
-    logger.info(f"Feather pixels: {feather_pixels}")
-    logger.info(f"Downsample factor: {downsample_factor}")
-    logger.info(f"Max dimension: {max_dimension}")
+    logger.info("=" * 60)
+    logger.info("HST MOSAIC CREATOR - STACKING")
+    logger.info("=" * 60)
 
     print("=" * 70)
-    print("HST MOSAIC CREATOR - OTTIMIZZATO".center(70))
+    print("🔭 HST MOSAIC CREATOR - STACKING".center(70))
     print("=" * 70)
 
-    # Trova i file
-    print("\n[1/5] Ricerca file...")
-    start_time = time.time()
+    # Setup directories
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    
+    # Find input files
+    input_pattern = os.path.join(INPUT_DIR, 'register_*.fits')
     files = sorted(glob.glob(input_pattern))
-    if len(files) == 0:
-        error_msg = f"Nessun file trovato con pattern '{input_pattern}'"
-        print(f"\n❌ ERRORE: {error_msg}")
-        logger.error(error_msg)
+    
+    if not files:
+        msg = f"Nessuna immagine registrata trovata in {INPUT_DIR}"
+        logger.error(msg)
+        print(f"\n❌ ERRORE: {msg}")
         return None
 
-    print(f"✓ Trovati {len(files)} file in {time.time()-start_time:.2f}s")
-    logger.info(f"Trovati {len(files)} file")
-    
-    for i, f in enumerate(files[:5]):
-        print(f"  {i+1:2d}. {os.path.basename(f)}")
-    if len(files) > 5:
-        print(f"  ... e altri {len(files)-5} file")
+    logger.info(f"Trovate {len(files)} immagini registrate")
+    print(f"\n✓ Trovate {len(files)} immagini da integrare")
 
-    # Carica le immagini
-    print(f"\n[2/5] Caricamento {len(files)} immagini...")
-    hdus = []
-    failed_files = []
-    load_start = time.time()
-    
-    for i, filepath in enumerate(files):
-        try:
-            hdu = fits.open(filepath)[0]
-            wcs = WCS(hdu.header)
-            if not wcs.has_celestial:
-                failed_files.append(filepath)
-                logger.warning(f"File senza coordinate celestiali: {os.path.basename(filepath)}")
-                continue
-            hdus.append(hdu)
-            
-            # Progress bar
-            print_progress_bar(i + 1, len(files), 
-                             prefix='Caricamento:', 
-                             suffix='Completato',
-                             elapsed_time=time.time() - load_start)
-        except Exception as e:
-            failed_files.append(filepath)
-            logger.error(f"Errore caricamento {os.path.basename(filepath)}: {e}")
-            continue
-
-    if len(hdus) == 0:
-        error_msg = "Nessuna immagine valida caricata!"
-        print(f"\n❌ ERRORE: {error_msg}")
-        logger.error(error_msg)
-        return None
-
-    print(f"✓ {len(hdus)}/{len(files)} immagini caricate con successo")
-    logger.info(f"Immagini caricate: {len(hdus)}/{len(files)}")
-    
-    if failed_files:
-        print(f"⚠️  {len(failed_files)} file saltati")
-        logger.warning(f"File saltati: {len(failed_files)}")
-
-    # Calcola WCS ottimale
-    print(f"\n[3/5] Calcolo WCS ottimale...")
-    wcs_start = time.time()
-    
-    all_wcs = []
-    for i, hdu in enumerate(hdus):
-        all_wcs.append(WCS(hdu.header).celestial)
-        if (i + 1) % 10 == 0 or i == len(hdus) - 1:
-            print_progress_bar(i + 1, len(hdus), 
-                             prefix='Analisi WCS:', 
-                             suffix='Completato',
-                             elapsed_time=time.time() - wcs_start)
-    
-    reference_wcs, shape_out = find_optimal_celestial_wcs(all_wcs)
-    
-    original_shape = shape_out
-    print(f"\n✓ WCS calcolato in {time.time()-wcs_start:.2f}s")
-    print(f"  Dimensioni originali: {shape_out[0]}x{shape_out[1]} pixel")
-    print(f"  Dimensioni stimate: {shape_out[0]*shape_out[1]/1e6:.1f} megapixel")
-    print(f"  Memoria stimata: {shape_out[0]*shape_out[1]*4/1e9:.2f} GB per immagine")
-    
-    logger.info(f"WCS calcolato - Dimensioni: {shape_out[0]}x{shape_out[1]}")
-
-    # Applica downsampling o max_dimension
-    if max_dimension is not None:
-        max_side = max(shape_out)
-        if max_side > max_dimension:
-            downsample_factor = max_side / max_dimension
-            print(f"\n⚠️  Dimensioni troppo grandi! Applicato downsample automatico: {downsample_factor:.2f}x")
-            logger.info(f"Downsample automatico applicato: {downsample_factor:.2f}x")
-    
-    if downsample_factor > 1:
-        shape_out = (int(shape_out[0] / downsample_factor), 
-                     int(shape_out[1] / downsample_factor))
-        # Aggiusta il WCS per il downsampling
-        reference_wcs.wcs.cdelt *= downsample_factor
-        reference_wcs.wcs.crpix /= downsample_factor
-        print(f"  Dimensioni ridotte: {shape_out[0]}x{shape_out[1]} pixel")
-        print(f"  Fattore riduzione: {downsample_factor:.2f}x")
-
-    print(f"\n  Dimensioni finali output: {shape_out[0]}x{shape_out[1]} pixel")
-    print(f"  Memoria totale richiesta: ~{shape_out[0]*shape_out[1]*4*2/1e9:.2f} GB")
-    
-    logger.info(f"Dimensioni finali: {shape_out[0]}x{shape_out[1]}")
-
-    # Crea il mosaico
-    print(f"\n[4/5] Creazione mosaico")
-    print(f"  Metodo: {combine_function}")
-    print(f"  Feather: {feather_pixels} pixel")
-    print(f"  Immagini da elaborare: {len(hdus)}")
-
+    # Load and verify reference image
+    logger.info("Caricamento immagine di riferimento...")
     try:
-        # Inizializza accumulatori
-        sum_images = np.zeros(shape_out, dtype=np.float64)
-        sum_masks = np.zeros(shape_out, dtype=np.float64)
-        count = 0
-        
-        mosaic_start = time.time()
-
-        # Processa un'immagine alla volta
-        for i, hdu in enumerate(hdus):
-            try:
-                # Reproietta l'immagine
-                reprojected_data, _ = reproject_interp(hdu, reference_wcs, shape_out=shape_out)
+        with fits.open(files[0]) as hdul:
+            ref_data = hdul[0].data
+            ref_header = hdul[0].header
+            
+            if ref_data is None:
+                raise ValueError("Nessun dato nell'immagine di riferimento")
                 
-                # Crea maschera e pulisci dati
-                mask = create_feather_mask(reprojected_data.shape, feather_pixels=feather_pixels)
-                data_clean = np.nan_to_num(reprojected_data, nan=0.0)
-                
-                # Accumula
-                sum_images += data_clean * mask
-                sum_masks += mask
-                count += 1
-                
-                # Libera memoria
-                del reprojected_data, mask, data_clean
-                gc.collect()
-                
-                # Progress bar
-                filename = getattr(hdu, '_file', None)
-                if filename and hasattr(filename, 'name'):
-                    display_name = os.path.basename(filename.name)[:30]
-                else:
-                    display_name = f"Image {i+1}"
-                
-                print_progress_bar(i + 1, len(hdus), 
-                                 prefix='Elaborazione:', 
-                                 suffix=display_name,
-                                 elapsed_time=time.time() - mosaic_start)
-                
-            except Exception as e:
-                filename = getattr(hdu, '_file', None)
-                if filename and hasattr(filename, 'name'):
-                    display_name = os.path.basename(filename.name)
-                else:
-                    display_name = f"Image {i+1}"
-                print(f"\n    ⚠️  Saltata {display_name}: {e}")
-                logger.error(f"Errore elaborazione {display_name}: {e}")
-                continue
-
-        if count == 0:
-            error_msg = "Nessuna immagine elaborata con successo!"
-            print(f"\n❌ ERRORE: {error_msg}")
-            logger.error(error_msg)
-            return None
-
-        print(f"\n✓ {count} immagini elaborate in {time.time()-mosaic_start:.2f}s")
-        logger.info(f"Immagini elaborate: {count}")
-        
-        # Normalizzazione
-        print("\n[5/5] Normalizzazione e salvataggio...")
-        norm_start = time.time()
-        
-        print("  ⏳ Normalizzazione dati...", end='', flush=True)
-        mosaic = np.divide(sum_images, sum_masks, 
-                          out=np.zeros_like(sum_images), 
-                          where=sum_masks != 0)
-        print(f" ✓ ({time.time()-norm_start:.2f}s)")
-
-        # Crea directory di output se non esiste
-        os.makedirs(os.path.dirname(output_file), exist_ok=True)
-
-        # Crea header
-        print("  ⏳ Creazione header FITS...", end='', flush=True)
-        header = reference_wcs.to_header()
-        header['COMMENT'] = 'Mosaic created from registered images'
-        header['NIMAGES'] = count
-        header['COMBFUNC'] = combine_function
-        header['FEATHERPX'] = feather_pixels
-        header['DOWNSAMP'] = downsample_factor
-        header['ORIGSHP1'] = original_shape[0]
-        header['ORIGSHP2'] = original_shape[1]
-        header['CREATOR'] = 'AstroMosaic - SuperResolution Pipeline'
-        header['DATE'] = datetime.now().isoformat()
-        print(" ✓")
-
-        # Salva file
-        print(f"  ⏳ Salvataggio file ({mosaic.nbytes/1e9:.2f} GB)...", end='', flush=True)
-        save_start = time.time()
-        hdu_out = fits.PrimaryHDU(data=mosaic.astype(np.float32), header=header)
-        hdu_out.writeto(output_file, overwrite=True)
-        print(f" ✓ ({time.time()-save_start:.2f}s)")
-        
-        # Statistiche finali
-        valid_pixels = np.sum(mosaic != 0)
-        print(f"\n✓ Normalizzazione completata in {time.time()-norm_start:.2f}s")
-        print(f"\nStatistiche finali:")
-        print(f"  File output: {output_file}")
-        print(f"  Dimensioni: {mosaic.shape[1]}x{mosaic.shape[0]} pixel")
-        print(f"  Pixel totali: {mosaic.size:,}")
-        print(f"  Pixel validi: {valid_pixels:,}")
-        print(f"  Copertura: {valid_pixels/mosaic.size*100:.1f}%")
-        if valid_pixels > 0:
-            print(f"  Min/Max valori: {np.min(mosaic[mosaic!=0]):.2e} / {np.max(mosaic):.2e}")
-        print(f"  Dimensione file: {mosaic.nbytes/1e6:.2f} MB")
-
-        logger.info(f"Mosaico completato - Dimensioni: {mosaic.shape}")
-        logger.info(f"File salvato: {output_file}")
-        logger.info(f"Pixel validi: {valid_pixels:,}/{mosaic.size:,} ({valid_pixels/mosaic.size*100:.1f}%)")
-
-        # Chiudi i file
-        for hdu in hdus:
-            if hasattr(hdu, '_file') and hdu._file is not None:
-                hdu._file.close()
-
-        total_time = time.time() - start_time
-        print("\n" + "=" * 70)
-        print("COMPLETATO CON SUCCESSO!".center(70))
-        print(f"Tempo totale: {total_time/60:.1f} minuti ({total_time:.0f} secondi)".center(70))
-        print("=" * 70)
-
-        logger.info(f"Tempo totale di esecuzione: {total_time:.2f} secondi")
-        logger.info("ELABORAZIONE TERMINATA CON SUCCESSO")
-
-        return output_file
-
+            final_shape = ref_data.shape
+            logger.info(f"Dimensioni riferimento: {final_shape}")
+            print(f"✓ Dimensioni canvas: {final_shape[1]}x{final_shape[0]} pixel")
+            
+            # Extract WCS info
+            wcs = WCS(ref_header)
+            if wcs.has_celestial:
+                ra, dec = wcs.wcs.crval
+                logger.info(f"Centro WCS: RA={ra:.3f}°, DEC={dec:.3f}°")
+                print(f"✓ Centro: RA={ra:.3f}°, DEC={dec:.3f}°")
+    
     except Exception as e:
-        error_msg = f"Errore durante la creazione del mosaico: {e}"
-        print(f"\n\n❌ ERRORE: {error_msg}")
-        logger.error(error_msg)
-        import traceback
-        traceback.print_exc()
-        logger.error(traceback.format_exc())
+        logger.error(f"Errore caricamento riferimento: {e}", exc_info=True)
+        print(f"\n❌ ERRORE: Impossibile caricare immagine di riferimento")
         return None
 
+    # Initialize accumulators
+    logger.info("Inizializzazione accumulatori...")
+    final_sum = np.zeros(final_shape, dtype=np.float64)
+    count_array = np.zeros(final_shape, dtype=np.int32)
+    
+    # Stack images
+    logger.info(f"Avvio stacking di {len(files)} immagini...")
+    print(f"\n🔄 Integrazione di {len(files)} immagini...")
+    
+    stack_start = time.time()
+    errors = []
 
-def diagnose_fits_files(input_pattern=None):
-    """Diagnostica le immagini FITS"""
-    if input_pattern is None:
-        input_pattern = os.path.join(INPUT_DIR, "*.fits")
-    
-    print("=" * 70)
-    print("DIAGNOSTICA FILE FITS".center(70))
-    print("=" * 70)
-    
-    files = sorted(glob.glob(input_pattern))
-    print(f"\nTrovati {len(files)} file\n")
-    
-    start_time = time.time()
-    for idx, f in enumerate(files):
-        try:
-            hdul = fits.open(f)
-            chosen = None
-            for h in hdul:
-                if h.data is None:
-                    continue
-                w = WCS(h.header)
-                if w.has_celestial:
-                    chosen = h
-                    break
-            
-            if chosen is None:
-                print(f"{os.path.basename(f):40s} → ❌ NO HDU con dati + WCS")
-                hdul.close()
-                continue
-            
-            shape = chosen.data.shape
-            crval = chosen.header.get('CRVAL1'), chosen.header.get('CRVAL2')
-            crpix = chosen.header.get('CRPIX1'), chosen.header.get('CRPIX2')
-            print(f"{os.path.basename(f):40s} shape={shape} CRVAL={crval} CRPIX={crpix}")
-            hdul.close()
-            
-        except Exception as e:
-            print(f"{os.path.basename(f):40s} → ❌ ERRORE: {e}")
-        
-        # Progress bar
-        print_progress_bar(idx + 1, len(files), 
-                         prefix='\nProgresso:', 
-                         suffix='Completato',
-                         elapsed_time=time.time() - start_time)
+    with tqdm(total=len(files), desc="Stacking", unit="img") as pbar:
+        for i, filename in enumerate(files):
+            try:
+                with fits.open(filename) as hdul:
+                    data = hdul[0].data
+                    
+                    if data.shape != final_shape:
+                        msg = f"Dimensioni non corrispondenti: {data.shape}"
+                        logger.warning(f"Skip {os.path.basename(filename)}: {msg}")
+                        errors.append(f"Dimensioni errate in {filename}")
+                        continue
 
+                    # Check data validity
+                    valid_pixels = np.isfinite(data)
+                    n_valid = np.sum(valid_pixels)
+                    coverage = (n_valid / data.size) * 100
+                    
+                    logger.info(f"Frame {i+1}: {n_valid:,} pixel validi ({coverage:.1f}%)")
+                    
+                    if coverage < 1.0:
+                        msg = f"Copertura insufficiente: {coverage:.1f}%"
+                        logger.warning(f"Skip {os.path.basename(filename)}: {msg}")
+                        errors.append(f"Copertura bassa in {filename}")
+                        continue
+                    
+                    # Add to stack
+                    final_sum[valid_pixels] += data[valid_pixels]
+                    count_array[valid_pixels] += 1
+                    
+                    # Update progress
+                    pbar.set_description(f"Stack: {i+1}/{len(files)}")
+                    pbar.update(1)
+
+            except Exception as e:
+                msg = f"Errore in {os.path.basename(filename)}: {str(e)}"
+                logger.error(msg, exc_info=True)
+                errors.append(msg)
+            
+            # Memory cleanup
+            gc.collect()
+
+    # Calculate final mosaic
+    logger.info("Calcolo mosaico finale...")
+    final_mosaic = np.divide(final_sum, count_array, 
+                            out=np.zeros_like(final_sum), 
+                            where=count_array > 0)
+
+    # Update header
+    ref_header['NCOMBINE'] = (len(files), 'Number of images combined')
+    ref_header['COMBFUNC'] = (combine_function, 'Combination method')
+    ref_header['DATE'] = datetime.now().isoformat()
+    ref_header['CREATOR'] = 'AstroMosaic.py'
+
+    # Save mosaic
+    output_file = os.path.join(OUTPUT_DIR, 'mosaic_final.fits')
+    logger.info(f"Salvataggio mosaico: {output_file}")
+    
+    fits.PrimaryHDU(final_mosaic.astype(np.float32), 
+                    header=ref_header).writeto(output_file, overwrite=True)
+
+    # Print summary
+    print("\n📊 RIEPILOGO INTEGRAZIONE:")
+    print(f"   Immagini processate: {len(files)}")
+    print(f"   Errori: {len(errors)}")
+    if errors:
+        print("\n⚠️ ERRORI RISCONTRATI:")
+        for err in errors[:5]:
+            print(f"   - {err}")
+        if len(errors) > 5:
+            print(f"   ... e altri {len(errors)-5} errori")
+
+    logger.info("Stacking completato")
+    return output_file
 
 if __name__ == "__main__":
-    # ===== CONFIGURAZIONE =====
+    start_time = time.time()
     
-    # I percorsi vengono ora configurati automaticamente dalle costanti in cima al file
-    # ma puoi sovrascriverli qui se necessario
+    output = stack_mosaic(combine_function='mean')
     
-    # input_pattern = os.path.join(INPUT_DIR, "*.fits")  # Usa default
-    # output_file = None  # Genera automaticamente con timestamp
+    if output:
+        print(f"\n✅ MOSAICO COMPLETATO")
+        print(f"📁 Salvato in: {output}")
     
-    # Parametri del mosaico
-    combine_method = 'mean'
-    feather_pixels = 50
-    
-    # OPZIONI PER GESTIRE GRANDI DIMENSIONI:
-    
-    # OPZIONE 1: Ridimensiona automaticamente se troppo grande
-    max_dimension = 8000  # Dimensione massima in pixel (None per disabilitare)
-    
-    # OPZIONE 2: Downsample fisso (2 = metà dimensioni, 4 = un quarto, ecc.)
-    downsample_factor = 1  # 1 = nessun downsample
-    
-    # SUGGERIMENTI:
-    # - Per molte immagini, prova max_dimension=8000 o 10000
-    # - Se hai ancora errori di memoria, riduci a 6000 o 4000
-    # - Oppure usa downsample_factor=2 per dimezzare le dimensioni
-    
-    print("CONFIGURAZIONE:")
-    print(f"  Input Directory:  {INPUT_DIR}")
-    print(f"  Output Directory: {OUTPUT_DIR}")
-    print(f"  Log Directory:    {LOG_DIR}")
-    print(f"  Metodo:           {combine_method}")
-    print(f"  Max dimension:    {max_dimension if max_dimension else 'Nessun limite'}")
-    print(f"  Downsample:       {downsample_factor}x\n")
-    
-    # Decommentare per diagnostica
-    # diagnose_fits_files()
-    
-    # Creazione mosaico
-    result = create_mosaic(
-        combine_function=combine_method,
-        feather_pixels=feather_pixels,
-        downsample_factor=downsample_factor,
-        max_dimension=max_dimension
-    )
-    
-    if result:
-        print(f"\n🎉 Mosaico completato: {result}")
+    elapsed = time.time() - start_time
+    print(f"\n⏱️ Tempo totale: {elapsed:.1f} secondi")
