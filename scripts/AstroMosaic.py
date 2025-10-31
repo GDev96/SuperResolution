@@ -1,6 +1,7 @@
 """
-HST MOSAIC CREATOR - Script di Stacking con Edge Blending
-Versione migliorata con fusione graduale dei bordi e gestione intelligente
+STEP 4: MOSAICO PER IMMAGINI SPARSE (NO STACK)
+Per immagini HST che coprono zone diverse senza sovrapposizione.
+Combina le immagini SENZA richiedere overlap - riempie i buchi con NaN.
 """
 
 import os
@@ -10,9 +11,7 @@ import time
 import logging
 import gc
 import numpy as np
-from scipy import ndimage
 from astropy.io import fits
-from astropy.wcs import WCS
 from datetime import datetime
 from tqdm import tqdm
 
@@ -21,21 +20,18 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 
 # ✅ PATH CORRETTI per la tua struttura
-INPUT_DIR = os.path.join(PROJECT_ROOT, 'data', 'img_register_4')   # Da img_register_4
-OUTPUT_DIR = os.path.join(PROJECT_ROOT, 'data', 'img_preprocessed') # A img_preprocessed
+INPUT_DIR = os.path.join(PROJECT_ROOT, 'data', 'img_register_4')    # Da img_register_4 (se esiste)
+OUTPUT_DIR = os.path.join(PROJECT_ROOT, 'data', 'img_preprocessed')  # A img_preprocessed
 LOG_DIR = os.path.join(PROJECT_ROOT, 'logs')
 
-# --- CONFIGURAZIONE BLENDING ---
-FEATHER_RADIUS = 100  # Pixel per la fusione graduale dei bordi (aumentato)
-SIGMA_CLIP_THRESHOLD = 3.0  # Soglia per sigma clipping
-USE_WEIGHTED_STACK = True  # Usa pesi basati sulla distanza dai bordi
-MIN_COVERAGE = 0.01  # Copertura minima per includere immagini (0.01%)
+# Fallback se img_register_4 non esiste ancora
+FALLBACK_INPUT_DIR = os.path.join(PROJECT_ROOT, 'data', 'img_plate_2')  # Se non hai ancora registrato
 
 def setup_logging():
     """Configura il sistema di logging."""
     os.makedirs(LOG_DIR, exist_ok=True)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_filename = os.path.join(LOG_DIR, f'mosaic_enhanced_{timestamp}.log')
+    log_filename = os.path.join(LOG_DIR, f'mosaic_sparse_{timestamp}.log')
     
     logging.basicConfig(
         level=logging.INFO,
@@ -45,378 +41,346 @@ def setup_logging():
             logging.StreamHandler()
         ]
     )
-    logger = logging.getLogger(__name__)
-    
-    # Log system info
-    logger.info(f"Python version: {sys.version}")
-    logger.info(f"Numpy version: {np.__version__}")
-    logger.info(f"Feather radius: {FEATHER_RADIUS} pixels")
-    logger.info(f"Weighted stacking: {USE_WEIGHTED_STACK}")
-    logger.info(f"Sigma clipping: {SIGMA_CLIP_THRESHOLD}")
-    logger.info(f"Min coverage: {MIN_COVERAGE}%")
-    
-    return logger
+    return logging.getLogger(__name__)
 
-def create_weight_map(data_shape, feather_radius=FEATHER_RADIUS):
+def create_mosaic_sparse():
     """
-    Crea una mappa dei pesi per il blending graduale.
-    I pixel vicini ai bordi hanno peso minore.
+    Crea mosaico da immagini sparse (NON sovrapposte).
+    Prende il valore medio dove le immagini si sovrappongono,
+    mantiene i singoli valori dove non c'è overlap.
     """
-    height, width = data_shape
-    
-    # Crea griglia di coordinate
-    y, x = np.mgrid[0:height, 0:width]
-    
-    # Calcola distanza dai bordi
-    dist_from_edges = np.minimum(
-        np.minimum(x, width - 1 - x),
-        np.minimum(y, height - 1 - y)
-    )
-    
-    # Crea mappa pesi con transizione graduale
-    if feather_radius > 0:
-        weights = np.clip(dist_from_edges / feather_radius, 0, 1)
-        # Applica funzione smooth (coseno per transizione più morbida)
-        weights = 0.5 * (1 + np.cos(np.pi * (1 - weights)))
-    else:
-        weights = np.ones_like(dist_from_edges, dtype=np.float32)
-    
-    return weights.astype(np.float32)
-
-def sigma_clip_combine(data_stack, weights_stack, sigma=SIGMA_CLIP_THRESHOLD):
-    """
-    Combina le immagini con sigma clipping per rimuovere outlier.
-    """
-    if data_stack.shape[0] < 3:
-        # Troppo poche immagini per sigma clipping, usa media pesata
-        weight_sum = np.sum(weights_stack, axis=0)
-        valid_mask = weight_sum > 0
-        
-        result = np.zeros(data_stack.shape[1:], dtype=np.float32)
-        numerator = np.sum(data_stack * weights_stack, axis=0)
-        result[valid_mask] = numerator[valid_mask] / weight_sum[valid_mask]
-        
-        return result
-    
-    # Calcola mediana e deviazione standard robusta
-    median = np.median(data_stack, axis=0)
-    mad = np.median(np.abs(data_stack - median[np.newaxis, :, :]), axis=0)
-    sigma_est = 1.4826 * mad  # Stima robusta della deviazione standard
-    
-    # Evita divisione per zero
-    sigma_est = np.where(sigma_est == 0, np.nanstd(data_stack, axis=0), sigma_est)
-    
-    # Crea maschera per outlier
-    diff = np.abs(data_stack - median[np.newaxis, :, :])
-    outlier_mask = diff > (sigma * sigma_est[np.newaxis, :, :])
-    
-    # Azzera pesi per gli outlier
-    weights_clipped = weights_stack.copy()
-    weights_clipped[outlier_mask] = 0
-    
-    # Media pesata escludendo outlier
-    weight_sum = np.sum(weights_clipped, axis=0)
-    
-    # Evita divisione per zero
-    valid_mask = weight_sum > 0
-    result = np.zeros_like(median, dtype=np.float32)
-    
-    numerator = np.sum(data_stack * weights_clipped, axis=0)
-    result[valid_mask] = numerator[valid_mask] / weight_sum[valid_mask]
-    
-    return result
-
-def stack_mosaic_enhanced(combine_function='weighted_mean'):
-    """Esegue lo stacking migliorato con edge blending e gestione intelligente."""
     logger = setup_logging()
     logger.info("=" * 60)
-    logger.info("HST MOSAIC CREATOR - STACKING ENHANCED")
+    logger.info("MOSAICO PER IMMAGINI SPARSE")
     logger.info("=" * 60)
 
     print("=" * 70)
-    print("🔭 HST MOSAIC CREATOR - STACKING MIGLIORATO".center(70))
+    print("🖼️ MOSAICO IMMAGINI SPARSE".center(70))
     print("=" * 70)
-    print(f"Input:  {os.path.abspath(INPUT_DIR)}")
-    print(f"Output: {os.path.abspath(OUTPUT_DIR)}")
-    print(f"Edge blending: {FEATHER_RADIUS} pixel")
-    print(f"Sigma clipping: {SIGMA_CLIP_THRESHOLD}")
-
-    # Setup directories
+    print("\nℹ️  Modalità: combina immagini sparse senza richiedere overlap")
+    
+    # ✅ VERIFICA ESISTENZA DIRECTORY INPUT
+    current_input_dir = INPUT_DIR
+    if not os.path.exists(INPUT_DIR):
+        print(f"\n⚠️  Directory {INPUT_DIR} non trovata")
+        if os.path.exists(FALLBACK_INPUT_DIR):
+            current_input_dir = FALLBACK_INPUT_DIR
+            print(f"✓ Uso fallback: {FALLBACK_INPUT_DIR}")
+        else:
+            print(f"❌ Neppure {FALLBACK_INPUT_DIR} esiste!")
+            return None
+    
+    print(f"\n📁 Directory input: {os.path.abspath(current_input_dir)}")
+    print(f"📁 Directory output: {os.path.abspath(OUTPUT_DIR)}")
+    
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     
-    # Find input files
-    register_pattern = os.path.join(INPUT_DIR, 'register_*.fits')
-    lowcov_pattern = os.path.join(INPUT_DIR, 'lowcov_*.fits')
+    # ✅ CERCA PATTERN DI FILE DIVERSI
+    # Cerca prima file registrati, poi file originali HST
+    patterns_to_try = [
+        os.path.join(current_input_dir, 'register_*.fits'),
+        os.path.join(current_input_dir, 'lowcov_*.fits'),
+        os.path.join(current_input_dir, 'plate_*.fits'),
+        os.path.join(current_input_dir, 'hst_*.fits'),
+        os.path.join(current_input_dir, '*.fits')
+    ]
     
-    register_files = sorted(glob.glob(register_pattern))
-    lowcov_files = sorted(glob.glob(lowcov_pattern))
+    fits_files = []
+    pattern_used = None
     
-    print(f"\n📊 FILE TROVATI:")
-    print(f"   Copertura normale: {len(register_files)}")
-    print(f"   Copertura bassa: {len(lowcov_files)}")
+    for pattern in patterns_to_try:
+        fits_files = sorted(glob.glob(pattern))
+        if fits_files:
+            pattern_used = pattern
+            break
     
-    if not register_files and not lowcov_files:
-        msg = f"Nessuna immagine registrata trovata in {INPUT_DIR}"
-        logger.error(msg)
-        print(f"\n❌ ERRORE: {msg}")
-        print("💡 Esegui prima AstroRegister.py")
+    if not fits_files:
+        error_msg = f"Nessuna immagine trovata in {current_input_dir}"
+        logger.error(error_msg)
+        print(f"\n❌ ERRORE: {error_msg}")
+        print(f"\n💡 Pattern cercati:")
+        for pattern in patterns_to_try:
+            print(f"   - {pattern}")
         return None
-    
-    # Chiedi all'utente cosa includere
-    include_lowcov = False
-    if lowcov_files:
-        try:
-            choice = input("\nIncludere file a bassa copertura? (y/N): ").strip().lower()
-            include_lowcov = choice in ['y', 'yes', 'si', 's']
-        except:
-            include_lowcov = False
-    
-    # Seleziona file da usare
-    if include_lowcov:
-        files = register_files + lowcov_files
-        print(f"✓ Usando tutti i {len(files)} file")
-    else:
-        files = register_files
-        print(f"✓ Usando solo {len(files)} file a copertura normale")
-    
-    logger.info(f"Trovate {len(files)} immagini registrate")
 
-    # Load reference image for WCS and shape
-    logger.info("Caricamento immagine di riferimento...")
+    logger.info(f"Trovati {len(fits_files)} file con pattern: {pattern_used}")
+    print(f"\n✓ Trovati {len(fits_files)} file")
+    print(f"   Pattern usato: {os.path.basename(pattern_used)}")
+    
+    # Mostra alcuni file di esempio
+    print(f"\n📄 File trovati:")
+    for i, f in enumerate(fits_files[:5]):
+        print(f"   {i+1}. {os.path.basename(f)}")
+    if len(fits_files) > 5:
+        print(f"   ... e altri {len(fits_files)-5} file")
+
+    # Load reference for shape and WCS
     try:
-        with fits.open(files[0]) as hdul:
-            ref_data = hdul[0].data
-            ref_header = hdul[0].header
+        with fits.open(fits_files[0]) as hdul:
+            # ✅ TROVA HDU CON DATI (gestisce file multi-estensione HST)
+            data_hdu = None
+            for hdu_idx, hdu in enumerate(hdul):
+                if hdu.data is not None and len(hdu.data.shape) == 2:
+                    data_hdu = hdu
+                    data_hdu_idx = hdu_idx
+                    break
             
-            if ref_data is None:
-                raise ValueError("Nessun dato nell'immagine di riferimento")
-                
-            final_shape = ref_data.shape
-            logger.info(f"Dimensioni riferimento: {final_shape}")
-            print(f"✓ Dimensioni canvas: {final_shape[1]}x{final_shape[0]} pixel")
+            if data_hdu is None:
+                raise ValueError("Nessun HDU con dati 2D trovato")
             
-            # Extract WCS info
-            wcs = WCS(ref_header)
-            if wcs.has_celestial:
-                ra, dec = wcs.wcs.crval
-                logger.info(f"Centro WCS: RA={ra:.3f}°, DEC={dec:.3f}°")
-                print(f"✓ Centro: RA={ra:.3f}°, DEC={dec:.3f}°")
-                
-                # Calcola campo di vista
-                try:
-                    pixel_scale = ref_header.get('REGCOVER', 0.1)  # Fallback
-                    if 'CD1_1' in ref_header:
-                        pixel_scale_deg = abs(float(ref_header['CD1_1']))
-                        pixel_scale_arcsec = pixel_scale_deg * 3600
-                    else:
-                        pixel_scale_arcsec = 0.1  # Default Hubble
-                    
-                    fov_arcmin_x = (final_shape[1] * pixel_scale_arcsec) / 60
-                    fov_arcmin_y = (final_shape[0] * pixel_scale_arcsec) / 60
-                    print(f"✓ Campo di vista: {fov_arcmin_x:.1f}' x {fov_arcmin_y:.1f}'")
-                except:
-                    pass
-    
+            ref_header = data_hdu.header.copy()
+            final_shape = data_hdu.data.shape
+            
+        logger.info(f"Dimensioni canvas: {final_shape}")
+        logger.info(f"HDU dati: {data_hdu_idx}")
+        print(f"✓ Canvas: {final_shape[1]}x{final_shape[0]} pixel")
+        print(f"✓ HDU dati: {data_hdu_idx}")
+        
+        # ✅ MEMORIA STIMATA
+        memory_gb = (final_shape[0] * final_shape[1] * 4 * 2) / (1024**3)  # *2 per sum+count arrays
+        print(f"✓ Memoria stimata: ~{memory_gb:.1f} GB")
+            
     except Exception as e:
-        logger.error(f"Errore caricamento riferimento: {e}", exc_info=True)
-        print(f"\n❌ ERRORE: Impossibile caricare immagine di riferimento")
+        logger.error(f"Errore caricamento riferimento: {e}")
+        print(f"\n❌ ERRORE: Impossibile caricare riferimento")
+        print(f"   File: {fits_files[0]}")
+        print(f"   Errore: {e}")
         return None
 
-    # Carica tutte le immagini in memoria (se possibile)
-    logger.info("Precaricamento immagini...")
-    print(f"\n📥 Caricamento di {len(files)} immagini...")
+    # Initialize accumulators
+    sum_array = np.zeros(final_shape, dtype=np.float64)
+    count_array = np.zeros(final_shape, dtype=np.int32)
     
-    data_stack = []
-    weight_stack = []
-    metadata_list = []
+    print(f"\n🔄 Combinazione di {len(fits_files)} immagini sparse...")
+    logger.info("Avvio combinazione...")
     
-    with tqdm(total=len(files), desc="Caricamento", unit="img") as pbar:
-        for filename in files:
+    valid_count = 0
+    
+    with tqdm(total=len(fits_files), desc="Combinazione", unit="img") as pbar:
+        for filename in fits_files:
             try:
                 with fits.open(filename) as hdul:
-                    data = hdul[0].data
-                    header = hdul[0].header
+                    # ✅ TROVA HDU CON DATI
+                    data_hdu = None
+                    for hdu in hdul:
+                        if hdu.data is not None and len(hdu.data.shape) == 2:
+                            data_hdu = hdu
+                            break
+                    
+                    if data_hdu is None:
+                        logger.warning(f"No data HDU: {os.path.basename(filename)}")
+                        continue
+                    
+                    data = data_hdu.data
                     
                     if data.shape != final_shape:
-                        logger.warning(f"Skip {os.path.basename(filename)}: shape mismatch")
+                        logger.warning(f"Shape diverso: {os.path.basename(filename)} ({data.shape} vs {final_shape})")
                         continue
                     
-                    # Verifica validità dati
-                    finite_mask = np.isfinite(data)
-                    nonzero_mask = data != 0
-                    valid_pixels = finite_mask & nonzero_mask
+                    # ✅ TROVA PIXEL VALIDI (gestisce diversi tipi di "vuoto")
+                    valid_mask = (
+                        np.isfinite(data) & 
+                        (data != 0) & 
+                        ~np.isnan(data) & 
+                        ~np.isinf(data)
+                    )
                     
-                    n_valid = np.sum(valid_pixels)
+                    n_valid = valid_mask.sum()
                     coverage = (n_valid / data.size) * 100
                     
-                    if coverage < MIN_COVERAGE:
-                        logger.warning(f"Skip {os.path.basename(filename)}: copertura {coverage:.3f}%")
+                    if coverage < 0.01:  # Soglia molto bassa
+                        logger.warning(f"Copertura troppo bassa ({coverage:.4f}%): {os.path.basename(filename)}")
                         continue
                     
-                    # Crea mappa pesi per questa immagine
-                    if USE_WEIGHTED_STACK:
-                        # Combina pesi geometrici con validità dati
-                        geometric_weights = create_weight_map(data.shape, FEATHER_RADIUS)
-                        data_weights = valid_pixels.astype(np.float32)
-                        combined_weights = geometric_weights * data_weights
-                        
-                        # Normalizza i pesi per evitare bias verso immagini più grandi
-                        weight_sum = np.sum(combined_weights)
-                        if weight_sum > 0:
-                            combined_weights = combined_weights / weight_sum * n_valid
-                    else:
-                        combined_weights = valid_pixels.astype(np.float32)
+                    # Aggiungi ai pixel validi
+                    sum_array[valid_mask] += data[valid_mask]
+                    count_array[valid_mask] += 1
                     
-                    # Sostituisci NaN/inf con zero
-                    clean_data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
-                    
-                    data_stack.append(clean_data)
-                    weight_stack.append(combined_weights)
-                    
-                    # Salva metadati
-                    metadata_list.append({
-                        'filename': os.path.basename(filename),
-                        'coverage': coverage,
-                        'regcover': header.get('REGCOVER', coverage),
-                        'valid_pixels': n_valid
-                    })
-                    
-                    logger.debug(f"Caricato {os.path.basename(filename)}: {coverage:.2f}% copertura, {n_valid:,} pixel")
+                    valid_count += 1
+                    logger.debug(f"✓ {os.path.basename(filename)}: {n_valid:,} pixel ({coverage:.3f}%)")
+                    pbar.set_description(f"✓ {valid_count} processate")
                     
             except Exception as e:
-                logger.error(f"Errore caricamento {os.path.basename(filename)}: {e}")
-                
+                logger.error(f"Errore {os.path.basename(filename)}: {e}")
+                pbar.set_description(f"❌ Errore: {os.path.basename(filename)}")
+            
             pbar.update(1)
+            
+            # ✅ GARBAGE COLLECTION PERIODICO
+            if (pbar.n % 5) == 0:
+                gc.collect()
     
-    if len(data_stack) == 0:
-        logger.error("Nessuna immagine valida caricata!")
-        print("\n❌ ERRORE: Nessuna immagine valida!")
+    if valid_count == 0:
+        logger.error("Nessuna immagine valida processata!")
+        print(f"\n❌ ERRORE: Nessuna immagine valida")
         return None
     
-    # Converti in array numpy
-    logger.info("Conversione in array numpy...")
-    data_stack = np.array(data_stack, dtype=np.float32)
-    weight_stack = np.array(weight_stack, dtype=np.float32)
+    logger.info(f"Processate {valid_count} immagini valide")
+    print(f"\n✓ Processate: {valid_count}/{len(fits_files)} immagini")
+
+    # Calculate final mosaic (mean where overlap, single value where not)
+    print(f"\n🧮 Calcolo mosaico finale...")
     
-    print(f"\n✓ Caricate {len(data_stack)} immagini valide")
-    print(f"📏 Shape stack: {data_stack.shape}")
-    print(f"💾 Memoria usata: ~{data_stack.nbytes / 1024**3:.1f} GB")
+    # ✅ CALCOLO SICURO DELLA MEDIA
+    with np.errstate(divide='ignore', invalid='ignore'):
+        final_mosaic = np.divide(
+            sum_array, 
+            count_array, 
+            out=np.full_like(sum_array, np.nan, dtype=np.float32),
+            where=count_array > 0
+        )
     
-    # Combina le immagini
-    logger.info(f"Combinazione con metodo: {combine_function}")
-    print(f"\n🔄 Combinazione immagini con {combine_function}...")
+    # Statistics
+    valid_pixels = np.isfinite(final_mosaic) & (final_mosaic != 0)
+    coverage_total = (valid_pixels.sum() / final_mosaic.size) * 100
     
-    if combine_function == 'weighted_mean':
-        # Media pesata con sigma clipping
-        print("   Metodo: Media pesata con sigma clipping e edge blending")
-        final_mosaic = sigma_clip_combine(data_stack, weight_stack, SIGMA_CLIP_THRESHOLD)
+    # Coverage map statistics
+    unique_counts = np.unique(count_array[count_array > 0])
+    
+    logger.info("Statistiche mosaico:")
+    logger.info(f"  Pixel totali: {final_mosaic.size:,}")
+    logger.info(f"  Pixel con dati: {valid_pixels.sum():,} ({coverage_total:.2f}%)")
+    
+    if valid_pixels.sum() > 0:
+        valid_data = final_mosaic[valid_pixels]
+        logger.info(f"  Range valori: {np.min(valid_data):.2e} - {np.max(valid_data):.2e}")
         
-    elif combine_function == 'simple_mean':
-        # Media semplice con pesi
-        print("   Metodo: Media pesata semplice con edge blending")
-        weight_sum = np.sum(weight_stack, axis=0)
-        valid_mask = weight_sum > 0
+        print(f"\n📊 STATISTICHE MOSAICO:")
+        print(f"   Pixel totali: {final_mosaic.size:,}")
+        print(f"   Pixel con dati: {valid_pixels.sum():,} ({coverage_total:.2f}%)")
+        print(f"   Min: {np.min(valid_data):.2e}")
+        print(f"   Max: {np.max(valid_data):.2e}")
+        print(f"   Media: {np.mean(valid_data):.2e}")
+        print(f"   Mediana: {np.median(valid_data):.2e}")
         
-        final_mosaic = np.zeros(final_shape, dtype=np.float32)
-        numerator = np.sum(data_stack * weight_stack, axis=0)
-        final_mosaic[valid_mask] = numerator[valid_mask] / weight_sum[valid_mask]
+        print(f"\n📈 DISTRIBUZIONE SOVRAPPOSIZIONI:")
+        for count in sorted(unique_counts):
+            n_pixels = (count_array == count).sum()
+            percent = (n_pixels / valid_pixels.sum()) * 100
+            print(f"   {count} immagini: {n_pixels:,} pixel ({percent:.1f}%)")
+    else:
+        print(f"\n⚠️  Nessun pixel valido nel mosaico finale!")
+        return None
+    
+    # Update header
+    ref_header['NIMAGES'] = (valid_count, 'Number of images in mosaic')
+    ref_header['COVERAGE'] = (coverage_total, 'Percentage of canvas with data')
+    ref_header['COMBMODE'] = ('sparse', 'Sparse mosaic mode')
+    ref_header['DATE'] = datetime.now().isoformat()
+    ref_header['CREATOR'] = 'AstroMosaic.py v1.1'
+    ref_header['INPUTDIR'] = os.path.basename(current_input_dir)
+    ref_header['PATTERN'] = os.path.basename(pattern_used)
+    
+    # ✅ NORMALIZZAZIONE MIGLIORATA
+    print(f"\n🎨 Normalizzazione dati...")
+    
+    if valid_pixels.sum() > 100:  # Abbastanza pixel per statistiche affidabili
+        valid_data = final_mosaic[valid_pixels]
         
-    elif combine_function == 'median':
-        # Mediana (più robusto ma più lento)
-        print("   Metodo: Mediana robusta")
-        # Usa solo pixel con peso > 0 per la mediana
-        masked_data = np.where(weight_stack > 0, data_stack, np.nan)
-        final_mosaic = np.nanmedian(masked_data, axis=0)
-        final_mosaic = np.nan_to_num(final_mosaic, nan=0.0)
+        # Usa percentili per rimozione outlier robusta
+        p_low = np.percentile(valid_data, 0.5)   # 0.5% percentile
+        p_high = np.percentile(valid_data, 99.5)  # 99.5% percentile
+        
+        logger.info(f"Range normalizzazione: {p_low:.2e} - {p_high:.2e}")
+        print(f"   Range: {p_low:.2e} - {p_high:.2e}")
+        
+        # Clip e normalizza
+        final_mosaic_normalized = np.clip(final_mosaic, p_low, p_high)
+        
+        # Normalizza a 0-1, poi scala a range appropriato
+        if p_high > p_low:
+            final_mosaic_normalized = (final_mosaic_normalized - p_low) / (p_high - p_low)
+            
+            # Scala a 16-bit (0-65535) per massima dinamica
+            final_mosaic_normalized = final_mosaic_normalized * 65535.0
+        else:
+            logger.warning("Range di valori troppo piccolo per normalizzazione")
+            final_mosaic_normalized = final_mosaic
+        
+        # Ripristina NaN dove non c'erano dati
+        final_mosaic_normalized[~valid_pixels] = 0.0  # Usa 0 invece di NaN per compatibilità
         
     else:
-        # Default: weighted mean
-        final_mosaic = sigma_clip_combine(data_stack, weight_stack, SIGMA_CLIP_THRESHOLD)
+        logger.warning("Troppo pochi pixel validi per normalizzazione")
+        final_mosaic_normalized = final_mosaic
+        final_mosaic_normalized[~valid_pixels] = 0.0
     
-    # Cleanup memoria
-    del data_stack, weight_stack
-    gc.collect()
+    logger.info("Normalizzazione completata")
     
-    # Calcola statistiche finali
-    valid_pixels_final = np.sum(final_mosaic != 0)
-    coverage_final = (valid_pixels_final / final_mosaic.size) * 100
-    
-    # Update header con metadati migliorati
-    ref_header['NCOMBINE'] = (len(metadata_list), 'Number of images combined')
-    ref_header['COMBFUNC'] = (combine_function, 'Combination method')
-    ref_header['FEATHER'] = (FEATHER_RADIUS, 'Edge feathering radius (pixels)')
-    ref_header['SIGCLIP'] = (SIGMA_CLIP_THRESHOLD, 'Sigma clipping threshold')
-    ref_header['WEIGHTED'] = (USE_WEIGHTED_STACK, 'Used weighted stacking')
-    ref_header['MINCOVER'] = (MIN_COVERAGE, 'Minimum coverage threshold (%)')
-    ref_header['DATE'] = datetime.now().isoformat()
-    ref_header['CREATOR'] = 'AstroMosaic.py v2.1 Enhanced'
-    
-    # Aggiungi statistiche finali
-    ref_header['TOTPIX'] = final_mosaic.size
-    ref_header['VALIDPIX'] = valid_pixels_final
-    ref_header['COVERAGE'] = (coverage_final, 'Final mosaic coverage (%)')
-    ref_header['NIMGUSED'] = len(metadata_list)
-    
-    # Aggiungi statistiche per immagine
-    total_input_pixels = sum(meta['valid_pixels'] for meta in metadata_list)
-    ref_header['INPIXELS'] = (total_input_pixels, 'Total input valid pixels')
-    
-    # Save mosaic
+    # ✅ SALVATAGGIO CON NOME DESCRITTIVO
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_file = os.path.join(OUTPUT_DIR, f'mosaic_enhanced_{timestamp}.fits')
-    logger.info(f"Salvataggio mosaico migliorato: {output_file}")
+    base_name = f'mosaic_M42_HST_{valid_count}img_{timestamp}'
+    output_file = os.path.join(OUTPUT_DIR, f'{base_name}.fits')
     
-    fits.PrimaryHDU(final_mosaic.astype(np.float32), 
-                    header=ref_header).writeto(output_file, overwrite=True)
+    logger.info(f"Salvataggio: {output_file}")
+    print(f"\n💾 Salvataggio mosaico...")
+    
+    try:
+        # Salva come float32 per compatibilità
+        fits.PrimaryHDU(
+            final_mosaic_normalized.astype(np.float32), 
+            header=ref_header
+        ).writeto(output_file, overwrite=True)
+        
+        logger.info("Salvato con successo")
+        
+        # ✅ CREA ANCHE VERSIONE PNG PER PREVIEW (opzionale)
+        try:
+            import matplotlib.pyplot as plt
+            
+            preview_file = os.path.join(OUTPUT_DIR, f'{base_name}_preview.png')
+            
+            plt.figure(figsize=(12, 12))
+            plt.imshow(final_mosaic_normalized, cmap='gray', origin='lower')
+            plt.title(f'M42 Mosaic - HST F656N (Hα)\n{valid_count} images combined')
+            plt.colorbar(label='Intensity')
+            plt.tight_layout()
+            plt.savefig(preview_file, dpi=150, bbox_inches='tight')
+            plt.close()
+            
+            print(f"✓ Preview PNG salvato: {os.path.basename(preview_file)}")
+            
+        except ImportError:
+            logger.info("Matplotlib non disponibile - skip preview PNG")
+        except Exception as e:
+            logger.warning(f"Errore creazione preview: {e}")
+        
+    except Exception as e:
+        logger.error(f"Errore salvataggio: {e}")
+        print(f"\n❌ ERRORE: Salvataggio fallito")
+        print(f"   Errore: {e}")
+        return None
 
-    # Print summary
-    print(f"\n📊 RIEPILOGO INTEGRAZIONE MIGLIORATA:")
-    print(f"   Immagini combinate: {len(metadata_list)}")
-    print(f"   Metodo: {combine_function}")
-    print(f"   Edge feathering: {FEATHER_RADIUS} pixel")
-    print(f"   Sigma clipping: {SIGMA_CLIP_THRESHOLD}")
-    print(f"   Copertura finale: {coverage_final:.2f}%")
-    print(f"   Pixel validi: {valid_pixels_final:,} / {final_mosaic.size:,}")
-    print(f"   Pixel input totali: {total_input_pixels:,}")
-    print(f"   Compressione: {final_mosaic.size / total_input_pixels:.1f}x")
-
-    logger.info("Stacking migliorato completato")
+    print("\n" + "=" * 70)
+    print("✅ MOSAICO COMPLETATO".center(70))
+    print("=" * 70)
+    print(f"\n📁 File salvato:")
+    print(f"   {os.path.abspath(output_file)}")
+    print(f"\n📊 Risultati:")
+    print(f"   Immagini combinate: {valid_count}")
+    print(f"   Copertura totale: {coverage_total:.2f}%")
+    print(f"   Dimensioni: {final_shape[1]}x{final_shape[0]} pixel")
+    print(f"\n💡 NOTE:")
+    print(f"   - Zone con 1 immagine: valore originale")
+    print(f"   - Zone con overlap: media pesata")
+    print(f"   - Zone vuote: 0 (nero)")
+    print("\n" + "=" * 70)
+    
+    logger.info("Mosaico completato con successo")
     return output_file
 
 if __name__ == "__main__":
     start_time = time.time()
     
-    print("\n🔧 METODI DI COMBINAZIONE DISPONIBILI:")
-    print("1. weighted_mean (consigliato) - Media pesata con sigma clipping e edge blending")
-    print("2. simple_mean - Media pesata semplice con edge blending")
-    print("3. median - Mediana robusta (più lento ma elimina outlier)")
+    print("🔭 MOSAICO IMMAGINI HST SPARSE")
+    print(f"Versione ottimizzata per gestire diversi formati di file")
     
-    try:
-        choice = input("\nScegli metodo (1-3, default=1): ").strip()
-        if choice == "2":
-            method = "simple_mean"
-        elif choice == "3":
-            method = "median"
-        else:
-            method = "weighted_mean"
-    except:
-        method = "weighted_mean"
-    
-    print(f"✓ Usando metodo: {method}")
-    
-    output = stack_mosaic_enhanced(combine_function=method)
-    
-    if output:
-        print(f"\n✅ MOSAICO MIGLIORATO COMPLETATO")
-        print(f"📁 Salvato in: {output}")
-        print(f"\n💡 MIGLIORAMENTI APPLICATI:")
-        print(f"   ✓ Bordi sfumati con feathering di {FEATHER_RADIUS} pixel")
-        print(f"   ✓ Sigma clipping per rimuovere outlier")
-        print(f"   ✓ Pesi basati su distanza dai bordi")
-        print(f"   ✓ Gestione intelligente copertura bassa")
-        print(f"   ✓ Normalizzazione pesi per uniformità")
-    else:
-        print(f"\n❌ ERRORE nella creazione del mosaico")
+    output = create_mosaic_sparse()
     
     elapsed = time.time() - start_time
     print(f"\n⏱️ Tempo totale: {elapsed:.1f} secondi")
+    
+    if output:
+        print(f"✅ Mosaico creato con successo!")
+    else:
+        print(f"❌ Errore nella creazione del mosaico")
