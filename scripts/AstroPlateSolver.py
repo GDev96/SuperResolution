@@ -19,10 +19,14 @@ import numpy as np
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 
-# ✅ PATH CORRETTI
-INPUT_DIR = os.path.join(PROJECT_ROOT, 'data', 'img_lights_1')      # Input originale HST
-OUTPUT_DIR = os.path.join(PROJECT_ROOT, 'data', 'img_plate_2')    # Output processato
-LOG_DIR = os.path.join(PROJECT_ROOT, 'logs')
+# CONFIGURAZIONE OGGETTO CELESTE
+# Cambia questo valore per elaborare oggetti diversi (M42, M33, NGC2024, etc.)
+TARGET_OBJECT = "M42"  # <-- MODIFICA QUI IL NOME DELL'OGGETTO
+
+# PATH AUTOMATICI BASATI SU TARGET_OBJECT
+INPUT_DIR = os.path.join(PROJECT_ROOT, 'data', 'img_lights_1', TARGET_OBJECT)      # Input originale HST
+OUTPUT_DIR = os.path.join(PROJECT_ROOT, 'data', 'img_plate_2', TARGET_OBJECT)     # Output processato  
+LOG_DIR = os.path.join(PROJECT_ROOT, 'logs', TARGET_OBJECT)
 
 def setup_logging():
     """Configura il sistema di logging."""
@@ -128,7 +132,8 @@ def prepare_images():
     print("=" * 70)
     print("🔭 STEP 1: PREPARAZIONE IMMAGINI HST".center(70))
     print("=" * 70)
-    print("\nℹ️  Estrazione dati da file drizzle multi-estensione...\n")
+    print(f"\n🎯 Oggetto Target: {TARGET_OBJECT}")
+    print("ℹ️  Estrazione dati da file drizzle multi-estensione...\n")
     
     # Setup directories
     os.makedirs(INPUT_DIR, exist_ok=True)

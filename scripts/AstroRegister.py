@@ -22,19 +22,23 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
 # --- CONFIGURAZIONE TEST ---
-MAX_IMAGES = 15  # Riduci per test veloce
+MAX_IMAGES = 5  # Riduci per test veloce
 NUM_THREADS = 1  # Numero di thread paralleli non superare gli 8
 # --- CONFIGURAZIONE PERCORSI ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 
-# ✅ PATH CORRETTI per la tua struttura reale
-INPUT_DIR = os.path.join(PROJECT_ROOT, 'data', 'img_cropped_3')     # Se esiste, altrimenti fallback
-OUTPUT_DIR = os.path.join(PROJECT_ROOT, 'data', 'img_register_4')   # Output registrazione
-LOG_DIR = os.path.join(PROJECT_ROOT, 'logs')
+# CONFIGURAZIONE OGGETTO CELESTE
+# Cambia questo valore per elaborare oggetti diversi (M42, M33, NGC2024, etc.)
+TARGET_OBJECT = "M42"  # <-- MODIFICA QUI IL NOME DELL'OGGETTO
+
+# PATH AUTOMATICI BASATI SU TARGET_OBJECT
+INPUT_DIR = os.path.join(PROJECT_ROOT, 'data', 'img_plate_2', TARGET_OBJECT)      # Se esiste, altrimenti fallback
+OUTPUT_DIR = os.path.join(PROJECT_ROOT, 'data', 'img_register_4', TARGET_OBJECT)    # Output registrazione
+LOG_DIR = os.path.join(PROJECT_ROOT, 'logs', TARGET_OBJECT)
 
 # Fallback per input (se img_cropped_3 non esiste)
-FALLBACK_INPUT_DIR = os.path.join(PROJECT_ROOT, 'data', 'img_lights_1')
+FALLBACK_INPUT_DIR = os.path.join(PROJECT_ROOT, 'data', 'img_lights_1', TARGET_OBJECT)
 
 # --- CONFIGURAZIONE SIRIL ---
 SIRIL_CLI = "C:\\Program Files\\SiriL\\bin\\siril-cli.exe"
@@ -580,6 +584,7 @@ def run_registration():
     print("=" * 70)
     print("🔭 ASTRO REGISTER - VERSIONE MULTITHREADING".center(70))
     print("=" * 70)
+    print(f"\n🎯 Oggetto Target: {TARGET_OBJECT}")
     
     # ✅ VERIFICA E MOSTRA PERCORSI REALI
     print(f"Input primario: {os.path.abspath(INPUT_DIR)}")

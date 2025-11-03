@@ -9,8 +9,13 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 import json
 
+# ✅ CONFIGURAZIONE OGGETTO CELESTE
+# Cambia questo valore per elaborare oggetti diversi (M42, M33, NGC2024, etc.)
+TARGET_OBJECT = "M42"  # <-- MODIFICA QUI IL NOME DELL'OGGETTO
+
 class HubbleAnalyzer:
-    def __init__(self, registered_dir='data/img_register_4'):
+    def __init__(self, target_object=TARGET_OBJECT, registered_dir=f'data/img_register_4/{TARGET_OBJECT}'):
+        self.target_object = target_object
         self.registered_dir = Path(registered_dir)
         self.analysis_results = {}
     
@@ -143,8 +148,8 @@ class HubbleAnalyzer:
     
     def save_analysis(self, all_info):
         """Salva analisi in JSON"""
-        output_file = Path('results') / 'hubble_analysis.json'
-        output_file.parent.mkdir(exist_ok=True)
+        output_file = Path('results') / self.target_object / 'hubble_analysis.json'
+        output_file.parent.mkdir(parents=True, exist_ok=True)
         
         with open(output_file, 'w') as f:
             json.dump(all_info, f, indent=2)
@@ -184,10 +189,10 @@ class HubbleAnalyzer:
         
         plt.colorbar(scatter, label='Image Index', ax=ax)
         
-        output_file = Path('results/visualizations')
+        output_file = Path('results/visualizations') / self.target_object
         output_file.mkdir(parents=True, exist_ok=True)
-        plt.savefig(output_file / 'hubble_coverage.png', dpi=150, bbox_inches='tight')
-        print(f"Mappa coverage salvata in: {output_file / 'hubble_coverage.png'}")
+        plt.savefig(output_file / f'{self.target_object}_coverage.png', dpi=150, bbox_inches='tight')
+        print(f"Mappa coverage salvata in: {output_file / f'{self.target_object}_coverage.png'}")
         plt.close()
     
     def select_best_images(self, all_info, criteria='std', top_n=None):
@@ -219,7 +224,8 @@ class HubbleAnalyzer:
         return sorted_imgs
 
 if __name__ == "__main__":
-    analyzer = HubbleAnalyzer('data/img_register_4')
+    print(f"🔭 Analisi immagini per oggetto: {TARGET_OBJECT}")
+    analyzer = HubbleAnalyzer(target_object=TARGET_OBJECT)
     all_info = analyzer.analyze_all_images()
     
     # Opzionale: seleziona subset migliori

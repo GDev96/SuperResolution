@@ -19,10 +19,13 @@ SuperResolution/
 ├── ⚙️ requirements_ui.txt         # Dipendenze interfaccia utente
 ├── 🚀 run_interface.py            # Launcher interfaccia web
 ├── 🎓 StesuraTesi/               # Documentazione tesi
-├── 📊 data/                      # Dataset e immagini
+├── 📊 data/                      # Dataset e immagini (organizzati per oggetto)
 │   ├── img_lights_1/             # Immagini originali HST
+│   │   ├── M42/                  # Nebulosa di Orione
+│   │   ├── M33/                  # Galassia del Triangolo
+│   │   └── NGC2024/              # Nebulosa Fiamma
 │   ├── img_plate_2/              # Immagini con WCS risolto
-│   ├── img_register_4/           # Immagini registrate/allineate
+│   ├── img_register_4/           # Immagini registrate/allineate  
 │   ├── img_preprocessed/         # Mosaici finali
 │   ├── dataset_sr_patches/       # Dataset per training SR
 │   ├── local_raw/                # Immagini locali grezze
@@ -31,6 +34,7 @@ SuperResolution/
 ├── 📝 logs/                      # Log di elaborazione
 ├── 📈 results/                   # Risultati e visualizzazioni
 ├── 🔧 scripts/                   # Pipeline di elaborazione
+│   ├── set_target_object.py      # 🎯 Gestione oggetti multipli
 │   ├── analyze_hubble.py         # Analisi immagini Hubble
 │   ├── AstroPlateSolver.py       # Risoluzione coordinate (WCS)
 │   ├── AstroRegister.py          # Registrazione/allineamento
@@ -68,7 +72,16 @@ pip install -r requirements_ui.txt
 python run_interface.py
 ```
 
-### 3. Pipeline di Elaborazione Astronomica
+### 3. Configurazione Oggetto Target
+
+```bash
+cd scripts
+
+# Gestione oggetti celesti multipli
+python set_target_object.py
+```
+
+### 4. Pipeline di Elaborazione Astronomica
 
 ```bash
 cd scripts
@@ -83,7 +96,98 @@ python AstroRegister.py
 python AstroMosaic.py
 ```
 
-## 🔄 Pipeline di Elaborazione
+## 🎯 Gestione Oggetti Multipli
+
+Il progetto supporta l'elaborazione di **diversi oggetti celesti** contemporaneamente. Ogni oggetto ha la sua struttura di directory separata:
+
+```
+data/
+├── img_lights_1/
+│   ├── M42/          # Nebulosa di Orione (Hα)
+│   ├── M33/          # Galassia del Triangolo  
+│   ├── NGC2024/      # Nebulosa Fiamma
+│   └── NGC7635/      # Nebulosa Bolla
+├── img_register_4/
+│   ├── M42/          # Immagini M42 registrate
+│   ├── M33/          # Immagini M33 registrate
+│   └── ...
+└── results/
+    ├── M42/          # Risultati per M42
+    ├── M33/          # Risultati per M33
+    └── ...
+```
+
+### 🔧 Cambio Oggetto Target
+
+```bash
+# Utility per gestire oggetti multipli
+python scripts/set_target_object.py
+
+# Menu interattivo per:
+# 1. Cambiare oggetto target esistente (M42, M33, NGC2024...)
+# 2. Creare nuovo oggetto con directory complete
+# 3. Solo creare struttura directory senza cambio
+```
+
+**Esempio di utilizzo:**
+```bash
+SuperResolution> python scripts/set_target_object.py
+
+=== GESTIONE OGGETTI CELESTI ===
+Oggetto attualmente impostato: M42
+
+Scegli un'opzione:
+1. Cambia oggetto esistente
+2. Crea nuovo oggetto
+3. Crea solo directory
+4. Esci
+
+> 1
+Oggetti disponibili: ['M42', 'M33']
+Inserisci nome oggetto: M33
+✅ TARGET_OBJECT aggiornato a M33 in tutti gli script
+```
+
+### 📁 Struttura Automatica
+
+Ogni oggetto ha automaticamente:
+- **Directory dati**: Separate per ogni fase della pipeline (`img_lights_1/M42/`, `img_register_4/M42/`)
+- **Logs**: Organizzati per oggetto e timestamp (`logs/M42_YYYYMMDD_HHMMSS.log`)
+- **Risultati**: Analisi e visualizzazioni dedicate (`results/M42/`)
+- **Dataset SR**: Training set specifici per oggetto (`dataset_sr_patches/M42/`)
+
+### ⚡ Workflow Completo
+
+```bash
+# 1. Imposta oggetto target
+python scripts/set_target_object.py
+
+# 2. Posiziona immagini FITS in data/img_lights_1/OGGETTO/
+# 3. Esegui pipeline completa
+python scripts/AstroPlateSolver.py   # WCS resolution
+python scripts/AstroRegister.py      # Registrazione 
+python scripts/AstroMosaic.py        # Mosaico finale
+
+# 4. Analisi opzionale
+python scripts/analyze_hubble.py     # Statistiche dettagliate
+```
+
+## � Formati e Compatibilità
+
+### 🔭 Formati Supportati
+- **FITS**: Standard astronomico (singola e multi-estensione)
+- **HST DRZ**: Hubble Space Telescope drizzle format
+- **WCS**: World Coordinate System per coordinate celesti
+- **Filtri**: H-alpha, OIII, RGB, Luminanza
+
+### 🎯 Oggetti Celesti Testati
+- **M42**: Nebulosa di Orione (H-alpha)
+- **M33**: Galassia del Triangolo
+- **NGC2024**: Nebulosa Fiamma  
+- **NGC7635**: Nebulosa Bolla
+- **Compatibile**: Tutti gli oggetti con immagini HST
+
+## �🔄 Pipeline di Elaborazione
 
 ### 📡 Elaborazione Immagini Astronomiche
 
@@ -231,6 +335,27 @@ python scripts/AstroRegister.py
 ## 🐛 Troubleshooting
 
 ### Errori Comuni
+
+#### Oggetto Target Non Trovato
+```bash
+# Errore: Directory data/img_lights_1/OGGETTO/ non esistente
+python scripts/set_target_object.py  # Crea directory mancanti
+```
+
+#### Cambio Oggetto Non Funziona
+```bash
+# Controlla sintassi TARGET_OBJECT nei file:
+grep -n "TARGET_OBJECT" scripts/*.py
+
+# Ripristina manualmente se necessario:
+python scripts/set_target_object.py  # Opzione 1: Aggiorna tutti gli script
+```
+
+#### Directory Vuote
+```bash
+# Crea struttura completa per nuovo oggetto
+python scripts/set_target_object.py  # Opzione 2: Crea nuovo oggetto
+```
 
 #### Memoria Insufficiente
 ```bash

@@ -11,14 +11,20 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import json
 
+# ✅ CONFIGURAZIONE OGGETTO CELESTE
+# Cambia questo valore per elaborare oggetti diversi (M42, M33, NGC2024, etc.)
+TARGET_OBJECT = "M42"  # <-- MODIFICA QUI IL NOME DELL'OGGETTO
+
 class SRDatasetCreator:
     def __init__(self, 
-                 hubble_dir='data/img_register_4',
-                 local_dir='data/local_processed',  # Dopo plate solving
-                 output_dir='data/dataset_sr_patches',
+                 target_object=TARGET_OBJECT,
+                 hubble_dir=f'data/img_register_4/{TARGET_OBJECT}',
+                 local_dir=f'data/local_processed/{TARGET_OBJECT}',  # Dopo plate solving
+                 output_dir=f'data/dataset_sr_patches/{TARGET_OBJECT}',
                  patch_size_hr=256,
                  scale_factor=4):
         
+        self.target_object = target_object
         self.hubble_dir = Path(hubble_dir)
         self.local_dir = Path(local_dir)
         self.output_dir = Path(output_dir)

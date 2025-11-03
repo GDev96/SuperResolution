@@ -19,13 +19,17 @@ from tqdm import tqdm
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 
-# ✅ PATH CORRETTI per la tua struttura
-INPUT_DIR = os.path.join(PROJECT_ROOT, 'data', 'img_register_4')    # Da img_register_4 (se esiste)
-OUTPUT_DIR = os.path.join(PROJECT_ROOT, 'data', 'img_preprocessed')  # A img_preprocessed
-LOG_DIR = os.path.join(PROJECT_ROOT, 'logs')
+# CONFIGURAZIONE OGGETTO CELESTE
+# Cambia questo valore per elaborare oggetti diversi (M42, M33, NGC2024, etc.)
+TARGET_OBJECT = "M42"  # <-- MODIFICA QUI IL NOME DELL'OGGETTO
+
+# PATH AUTOMATICI BASATI SU TARGET_OBJECT
+INPUT_DIR = os.path.join(PROJECT_ROOT, 'data', 'img_register_4', TARGET_OBJECT)    # Da img_register_4 (se esiste)
+OUTPUT_DIR = os.path.join(PROJECT_ROOT, 'data', 'img_preprocessed', TARGET_OBJECT) # A img_preprocessed
+LOG_DIR = os.path.join(PROJECT_ROOT, 'logs', TARGET_OBJECT)
 
 # Fallback se img_register_4 non esiste ancora
-FALLBACK_INPUT_DIR = os.path.join(PROJECT_ROOT, 'data', 'img_plate_2')  # Se non hai ancora registrato
+FALLBACK_INPUT_DIR = os.path.join(PROJECT_ROOT, 'data', 'img_plate_2', TARGET_OBJECT)  # Se non hai ancora registrato
 
 def setup_logging():
     """Configura il sistema di logging."""
@@ -57,7 +61,8 @@ def create_mosaic_sparse():
     print("=" * 70)
     print("🖼️ MOSAICO IMMAGINI SPARSE".center(70))
     print("=" * 70)
-    print("\nℹ️  Modalità: combina immagini sparse senza richiedere overlap")
+    print(f"\n🎯 Oggetto Target: {TARGET_OBJECT}")
+    print("ℹ️  Modalità: combina immagini sparse senza richiedere overlap")
     
     # ✅ VERIFICA ESISTENZA DIRECTORY INPUT
     current_input_dir = INPUT_DIR
@@ -309,7 +314,7 @@ def create_mosaic_sparse():
     
     # ✅ SALVATAGGIO CON NOME DESCRITTIVO
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    base_name = f'mosaic_M42_HST_{valid_count}img_{timestamp}'
+    base_name = f'mosaic_{TARGET_OBJECT}_HST_{valid_count}img_{timestamp}'
     output_file = os.path.join(OUTPUT_DIR, f'{base_name}.fits')
     
     logger.info(f"Salvataggio: {output_file}")
@@ -332,7 +337,7 @@ def create_mosaic_sparse():
             
             plt.figure(figsize=(12, 12))
             plt.imshow(final_mosaic_normalized, cmap='gray', origin='lower')
-            plt.title(f'M42 Mosaic - HST F656N (Hα)\n{valid_count} images combined')
+            plt.title(f'{TARGET_OBJECT} Mosaic - HST F656N (Hα)\n{valid_count} images combined')
             plt.colorbar(label='Intensity')
             plt.tight_layout()
             plt.savefig(preview_file, dpi=150, bbox_inches='tight')
