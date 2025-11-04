@@ -1,3 +1,4 @@
+# === AMBIENTE PYTHON ===
 venv/
 __pycache__/
 *.pyc
@@ -6,6 +7,27 @@ __pycache__/
 .ipynb_checkpoints
 .DS_Store
 *.log
-data/
+
+# === DATI ELABORATI (Auto-generati) ===
+# IMPORTANTE: img_lights_1/ deve essere inclusa per Git LFS!
+data/img_plate_2/
+data/img_register_4/
+data/img_preprocessed/
+data/local_processed/
+data/dataset_sr_patches/
 data/results/
+
+# === LOGS E CACHE ===
 logs/
+temp_*/
+
+# === MODELLI AI GRANDI ===
+models/*.pth
+models/*.pt
+models/*.h5
+*.onnx
+
+# === FILE TEMPORANEI ===
+*.tmp
+*.bak
+*~
