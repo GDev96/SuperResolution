@@ -23,13 +23,35 @@ from datetime import datetime
 import glob
 
 # ============================================================================
-# CONFIGURAZIONE - Usa le cartelle create da step1
+# CONFIGURAZIONE (DINAMICA)
 # ============================================================================
+from pathlib import Path
 
-BASE_DIR = r'F:\Super Revolt Gaia\SuperResolution\SuperResolution\data'
-HUBBLE_DIR = Path(BASE_DIR) / 'lith_con_wcs'  # Output step1 - Hubble
-OBS_DIR = Path(BASE_DIR) / 'osservatorio_con_wcs'  # Output step1 - Osservatorio
-OUTPUT_DIR = Path(BASE_DIR) / 'analisi_overlap'
+# Ottieni il percorso assoluto della directory contenente questo script
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+# Cerca la cartella 'data'
+if (SCRIPT_DIR / 'data').exists():
+    # Caso 1: Lo script è nella root del progetto
+    PROJECT_ROOT = SCRIPT_DIR
+elif (SCRIPT_DIR.parent / 'data').exists():
+    # Caso 2: Lo script è in una sottocartella
+    PROJECT_ROOT = SCRIPT_DIR.parent
+else:
+    raise FileNotFoundError(
+        f"Impossibile trovare la directory 'data' relativa a {SCRIPT_DIR}. "
+        "Assicurati che 'data' sia nella cartella principale del progetto."
+    )
+
+# Definisci i percorsi principali
+BASE_DIR = PROJECT_ROOT / 'data'
+# (Questo script non usa LOG_DIR, ma lo definiamo per coerenza se servisse)
+LOG_DIR = PROJECT_ROOT / 'logs' 
+
+# Percorsi usati dallo script
+HUBBLE_DIR = BASE_DIR / 'lith_con_wcs'  # Output step1 - Hubble
+OBS_DIR = BASE_DIR / 'osservatorio_con_wcs'  # Output step1 - Osservatorio
+OUTPUT_DIR = BASE_DIR / 'analisi_overlap'
 
 # Parametri patches
 TARGET_PATCH_ARCMIN = 1.0  # Dimensione target in arcmin

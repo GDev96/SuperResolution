@@ -36,10 +36,30 @@ except ImportError:
 
 
 # ============================================================================
-# CONFIGURAZIONE
+# CONFIGURAZIONE (DINAMICA)
 # ============================================================================
+import os
 
-BASE_DIR = r'F:\Super Revolt Gaia\SuperResolution\SuperResolution\data'
+# Ottieni il percorso assoluto della directory contenente questo script
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Cerca la cartella 'data'
+if os.path.isdir(os.path.join(SCRIPT_DIR, 'data')):
+    # Caso 1: Lo script è nella root del progetto
+    PROJECT_ROOT = SCRIPT_DIR
+elif os.path.isdir(os.path.join(os.path.dirname(SCRIPT_DIR), 'data')):
+    # Caso 2: Lo script è in una sottocartella
+    PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+else:
+    raise FileNotFoundError(
+        f"Impossibile trovare la directory 'data'. "
+        f"Verificata in {SCRIPT_DIR} e {os.path.dirname(SCRIPT_DIR)}. "
+        "Assicurati che 'data' sia nella cartella principale del progetto."
+    )
+
+# Definisci i percorsi principali
+BASE_DIR = os.path.join(PROJECT_ROOT, 'data')
+LOG_DIR = os.path.join(PROJECT_ROOT, 'logs')
 
 # Input: cartelle create da step1 (generiche)
 INPUT_HUBBLE = os.path.join(BASE_DIR, 'lith_con_wcs')
@@ -49,16 +69,9 @@ INPUT_OBSERVATORY = os.path.join(BASE_DIR, 'osservatorio_con_wcs')
 OUTPUT_HUBBLE = os.path.join(BASE_DIR, '3_registered_native', 'hubble')
 OUTPUT_OBSERVATORY = os.path.join(BASE_DIR, '3_registered_native', 'observatory')
 
-LOG_DIR = r'F:\Super Revolt Gaia\logs'
-
 # --- Parametri Registrazione ---
 NUM_THREADS = 7  # Thread paralleli
-
-# Ordine di interpolazione per reproject_interp:
-# - 'nearest': Veloce, nessun valore inventato, ma può creare bordi "a scaletta".
-# - 'bilinear': Default, buon compromesso, leggermente sfocato.
-# - 3 (cubica): Più liscio, ma può creare overshoot e ringing.
-REPROJECT_ORDER = 'bilinear' 
+REPROJECT_ORDER = 'bilinear'
 
 # Lock per logging thread-safe
 log_lock = threading.Lock()

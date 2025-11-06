@@ -26,30 +26,47 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ============================================================================
-# CONFIGURAZIONE
+# CONFIGURAZIONE (DINAMICA)
 # ============================================================================
+from pathlib import Path
 
-BASE_DIR = r'F:\Super Revolt Gaia\SuperResolution\SuperResolution\data'
+# Ottieni il percorso assoluto della directory contenente questo script
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+# Cerca la cartella 'data'
+if (SCRIPT_DIR / 'data').exists():
+    # Caso 1: Lo script è nella root del progetto
+    PROJECT_ROOT = SCRIPT_DIR
+elif (SCRIPT_DIR.parent / 'data').exists():
+    # Caso 2: Lo script è in una sottocartella
+    PROJECT_ROOT = SCRIPT_DIR.parent
+else:
+    raise FileNotFoundError(
+        f"Impossibile trovare la directory 'data' relativa a {SCRIPT_DIR}. "
+        "Assicurati che 'data' sia nella cartella principale del progetto."
+    )
+
+# Definisci i percorsi principali
+BASE_DIR = PROJECT_ROOT / 'data'
+LOG_DIR = PROJECT_ROOT / 'logs' 
 
 # --- Percorsi per Riepilogo Pipeline ---
 # Input: Originali (da Step 0/1)
-INPUT_ORIG_HUBBLE = Path(BASE_DIR) / 'img_lights_1'
-INPUT_ORIG_OBSERVATORY = Path(BASE_DIR) / 'local_raw'
+INPUT_ORIG_HUBBLE = BASE_DIR / 'img_lights_1'
+INPUT_ORIG_OBSERVATORY = BASE_DIR / 'local_raw'
 
 # Input: WCS (da Step 1)
-INPUT_WCS_HUBBLE = Path(BASE_DIR) / 'lith_con_wcs'
-INPUT_WCS_OBSERVATORY = Path(BASE_DIR) / 'osservatorio_con_wcs'
+INPUT_WCS_HUBBLE = BASE_DIR / 'lith_con_wcs'
+INPUT_WCS_OBSERVATORY = BASE_DIR / 'osservatorio_con_wcs'
 
 # Input: immagini registrate con risoluzione nativa (da Step 3)
-INPUT_HUBBLE = Path(BASE_DIR) / '3_registered_native' / 'hubble'
-INPUT_OBSERVATORY = Path(BASE_DIR) / '3_registered_native' / 'observatory'
+INPUT_HUBBLE = BASE_DIR / '3_registered_native' / 'hubble'
+INPUT_OBSERVATORY = BASE_DIR / '3_registered_native' / 'observatory'
 
 # Output: patches (da Step 4)
-OUTPUT_DIR = Path(BASE_DIR) / '4_patches_native'
+OUTPUT_DIR = BASE_DIR / '4_patches_native'
 OUTPUT_HUBBLE_PATCHES = OUTPUT_DIR / 'hubble_native'
 OUTPUT_OBS_PATCHES = OUTPUT_DIR / 'observatory_native'
-
-LOG_DIR = Path(r'F:\Super Revolt Gaia\logs')
 
 # --- PARAMETRI PATCHES ---
 # FOV target in arcmin - questo rimane costante per tutte le patches
@@ -62,7 +79,6 @@ MIN_VALID_PERCENT = 50  # % minima pixel validi (non-NaN) in una patch
 TRAIN_RATIO = 0.7
 VAL_RATIO = 0.15
 TEST_RATIO = 0.15
-
 # ============================================================================
 # SETUP
 # ============================================================================
