@@ -39,7 +39,7 @@ except ImportError:
 # CONFIGURAZIONE
 # ============================================================================
 
-BASE_DIR = r'F:\Super Revolt Gaia\parte 2(patch)\data'
+BASE_DIR = r'F:\Super Revolt Gaia\SuperResolution\SuperResolution\data'
 
 # Input: cartelle create da step1 (generiche)
 INPUT_HUBBLE = os.path.join(BASE_DIR, 'lith_con_wcs')

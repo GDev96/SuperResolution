@@ -29,7 +29,7 @@ warnings.filterwarnings('ignore')
 # CONFIGURAZIONE
 # ============================================================================
 
-BASE_DIR = r'F:\Super Revolt Gaia\parte 2(patch)\data'
+BASE_DIR = r'F:\Super Revolt Gaia\SuperResolution\SuperResolution\data'
 
 # --- Percorsi per Riepilogo Pipeline ---
 # Input: Originali (da Step 0/1)

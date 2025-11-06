@@ -26,7 +26,7 @@ import glob
 # CONFIGURAZIONE - Usa le cartelle create da step1
 # ============================================================================
 
-BASE_DIR = r'F:\Super Revolt Gaia\parte 2(patch)\data'
+BASE_DIR = r'F:\Super Revolt Gaia\SuperResolution\SuperResolution\data'
 HUBBLE_DIR = Path(BASE_DIR) / 'lith_con_wcs'  # Output step1 - Hubble
 OBS_DIR = Path(BASE_DIR) / 'osservatorio_con_wcs'  # Output step1 - Osservatorio
 OUTPUT_DIR = Path(BASE_DIR) / 'analisi_overlap'

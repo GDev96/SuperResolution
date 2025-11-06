@@ -21,7 +21,7 @@ import warnings
 warnings.filterwarnings('ignore', category=fits.verify.VerifyWarning)
 
 # --- CONFIGURAZIONE PERCORSI ---
-BASE_DIR = r'F:\Super Revolt Gaia\parte 2(patch)\data'
+BASE_DIR = r'F:\Super Revolt Gaia\SuperResolution\SuperResolution\data'
 # I percorsi di input ora puntano alle cartelle radice
 INPUT_OSSERVATORIO = os.path.join(BASE_DIR, 'local_raw')
 INPUT_LITH = os.path.join(BASE_DIR, 'img_lights_1')
