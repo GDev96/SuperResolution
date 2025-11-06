@@ -20,15 +20,35 @@ import warnings
 
 warnings.filterwarnings('ignore', category=fits.verify.VerifyWarning)
 
-# --- CONFIGURAZIONE PERCORSI ---
-BASE_DIR = r'F:\Super Revolt Gaia\SuperResolution\SuperResolution\data'
+# --- CONFIGURAZIONE PERCORSI (DINAMICA) ---
+import os
+
+# Ottieni il percorso assoluto della directory contenente questo script
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Cerca la cartella 'data'
+if os.path.isdir(os.path.join(SCRIPT_DIR, 'data')):
+    # Caso 1: Lo script è nella root del progetto (es. SuperResolution/step1.py)
+    PROJECT_ROOT = SCRIPT_DIR
+elif os.path.isdir(os.path.join(os.path.dirname(SCRIPT_DIR), 'data')):
+    # Caso 2: Lo script è in una sottocartella (es. SuperResolution/scripts/step1.py)
+    PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+else:
+    raise FileNotFoundError(
+        f"Impossibile trovare la directory 'data'. "
+        f"Verificata in {SCRIPT_DIR} e {os.path.dirname(SCRIPT_DIR)}. "
+        "Assicurati che 'data' sia nella cartella principale del progetto."
+    )
+
+# Definisci i percorsi principali
+BASE_DIR = os.path.join(PROJECT_ROOT, 'data')
+LOG_DIR = os.path.join(PROJECT_ROOT, 'logs')
+
 # I percorsi di input ora puntano alle cartelle radice
 INPUT_OSSERVATORIO = os.path.join(BASE_DIR, 'local_raw')
 INPUT_LITH = os.path.join(BASE_DIR, 'img_lights_1')
 OUTPUT_OSSERVATORIO = os.path.join(BASE_DIR, 'osservatorio_con_wcs')
 OUTPUT_LITH = os.path.join(BASE_DIR, 'lith_con_wcs')
-LOG_DIR = r'F:\Super Revolt Gaia\logs'
-
 
 def setup_logging():
     """Configura logging generico."""
