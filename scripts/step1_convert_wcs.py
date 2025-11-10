@@ -1,14 +1,14 @@
 """
 STEP 1: PREPARAZIONE IMMAGINI - CONVERSIONE WCS
 Converte coordinate esistenti (OBJCTRA/OBJCTDEC) in WCS standard
-Script generalizzato per tutti i target.
+Legge la configurazione da config.json (creato da step0)
 """
 
 import os
 import glob
 import time
+import json
 import logging
-# import argparse # Rimosso
 from datetime import datetime
 from astropy.io import fits
 from astropy.wcs import WCS
@@ -20,41 +20,64 @@ import warnings
 
 warnings.filterwarnings('ignore', category=fits.verify.VerifyWarning)
 
-# --- CONFIGURAZIONE PERCORSI (DINAMICA) ---
-import os
+# ============================================================================
+# CONFIGURAZIONE DINAMICA
+# ============================================================================
 
 # Ottieni il percorso assoluto della directory contenente questo script
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Cerca la cartella 'data'
 if os.path.isdir(os.path.join(SCRIPT_DIR, 'data')):
-    # Caso 1: Lo script è nella root del progetto (es. SuperResolution/step1.py)
     PROJECT_ROOT = SCRIPT_DIR
 elif os.path.isdir(os.path.join(os.path.dirname(SCRIPT_DIR), 'data')):
-    # Caso 2: Lo script è in una sottocartella (es. SuperResolution/scripts/step1.py)
     PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 else:
     raise FileNotFoundError(
         f"Impossibile trovare la directory 'data'. "
-        f"Verificata in {SCRIPT_DIR} e {os.path.dirname(SCRIPT_DIR)}. "
-        "Assicurati che 'data' sia nella cartella principale del progetto."
+        f"Verificata in {SCRIPT_DIR} e {os.path.dirname(SCRIPT_DIR)}."
     )
 
 # Definisci i percorsi principali
 BASE_DIR = os.path.join(PROJECT_ROOT, 'data')
 LOG_DIR = os.path.join(PROJECT_ROOT, 'logs')
+CONFIG_FILE = os.path.join(PROJECT_ROOT, 'config.json')
 
-# I percorsi di input ora puntano alle cartelle radice
-INPUT_OSSERVATORIO = os.path.join(BASE_DIR, 'local_raw')
-INPUT_LITH = os.path.join(BASE_DIR, 'img_lights_1')
-OUTPUT_OSSERVATORIO = os.path.join(BASE_DIR, 'osservatorio_con_wcs')
-OUTPUT_LITH = os.path.join(BASE_DIR, 'lith_con_wcs')
+# ============================================================================
+# LETTURA CONFIGURAZIONE
+# ============================================================================
 
-def setup_logging():
-    """Configura logging generico."""
-    os.makedirs(LOG_DIR, exist_ok=True)
+def load_config():
+    """Carica configurazione da config.json creato da step0"""
+    if not os.path.exists(CONFIG_FILE):
+        raise FileNotFoundError(
+            f"File config.json non trovato in {PROJECT_ROOT}\n"
+            "Esegui prima: python scripts/step0_set_target_object.py"
+        )
+    
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        
+        if 'target_object' not in config:
+            raise ValueError("Chiave 'target_object' mancante in config.json")
+        
+        return config
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Errore parsing config.json: {e}")
+
+
+# ============================================================================
+# LOGGING
+# ============================================================================
+
+def setup_logging(target_object):
+    """Configura logging per l'oggetto specifico."""
+    log_dir = os.path.join(LOG_DIR, target_object)
+    os.makedirs(log_dir, exist_ok=True)
+    
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_filename = os.path.join(LOG_DIR, f'preparation_wcs_{timestamp}.log')
+    log_filename = os.path.join(log_dir, f'step1_convert_wcs_{timestamp}.log')
     
     logging.basicConfig(
         level=logging.INFO,
@@ -66,6 +89,10 @@ def setup_logging():
     )
     return logging.getLogger(__name__)
 
+
+# ============================================================================
+# FUNZIONI CONVERSIONE WCS
+# ============================================================================
 
 def parse_coordinates(ra_str, dec_str):
     """
@@ -97,7 +124,7 @@ def parse_coordinates(ra_str, dec_str):
             
             # RA: ore, minuti, secondi -> gradi
             h, m, s = float(ra_parts[0]), float(ra_parts[1]), float(ra_parts[2])
-            ra_deg = (h + m/60.0 + s/3600.0) * 15.0  # * 15 per convertire ore in gradi
+            ra_deg = (h + m/60.0 + s/3600.0) * 15.0
             
             # DEC: gradi, minuti, secondi -> gradi
             d, m, s = float(dec_parts[0]), float(dec_parts[1]), float(dec_parts[2])
@@ -120,20 +147,17 @@ def calculate_pixel_scale(header):
     Returns:
         pixel_scale in gradi/pixel
     """
-    # Estrai parametri
     xpixsz = header.get('XPIXSZ', None)  # micron
     focal = header.get('FOCALLEN', header.get('FOCAL', None))  # mm
     xbin = header.get('XBINNING', 1)
     
     if xpixsz and focal:
-        # Formula: pixel_scale (arcsec/px) = 206.265 * pixel_size (mm) / focal_length (mm)
-        pixel_size_mm = (xpixsz * xbin) / 1000.0  # converti micron -> mm e applica binning
+        pixel_size_mm = (xpixsz * xbin) / 1000.0
         pixel_scale_arcsec = 206.265 * pixel_size_mm / focal
         pixel_scale_deg = pixel_scale_arcsec / 3600.0
         return pixel_scale_deg
     
     # Fallback: stima per setup comune
-    # Tipico per piccoli telescopi: ~1-2 arcsec/pixel
     return 1.5 / 3600.0  # 1.5 arcsec/pixel
 
 
@@ -175,7 +199,7 @@ def create_wcs_from_header(header, data_shape):
         # Pixel scale (negativo per RA per convenzione astronomica)
         wcs.wcs.cdelt = [-pixel_scale, pixel_scale]
         
-        # Tipo proiezione (TAN = tangente, standard per campi piccoli)
+        # Tipo proiezione
         wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
         
         # Sistema di riferimento
@@ -191,11 +215,6 @@ def create_wcs_from_header(header, data_shape):
 def add_wcs_to_file(input_file, output_file, logger):
     """
     Aggiunge WCS a un file FITS che ha OBJCTRA/OBJCTDEC.
-    
-    Args:
-        input_file: File input
-        output_file: File output con WCS
-        logger: Logger
     
     Returns:
         True se successo, False altrimenti
@@ -215,7 +234,6 @@ def add_wcs_to_file(input_file, output_file, logger):
             existing_wcs = WCS(header)
             if existing_wcs.has_celestial:
                 logger.info(f"✓ {filename}: WCS già presente")
-                # Copia comunque il file
                 hdul.writeto(output_file, overwrite=True)
                 return True
             
@@ -238,12 +256,10 @@ def add_wcs_to_file(input_file, output_file, logger):
             # Crea nuovo header combinato
             new_header = fits.Header()
             
-            # Prima i campi base
             for key in important_keys:
                 if key in header:
                     new_header[key] = header[key]
             
-            # Poi il WCS
             new_header.update(wcs_header)
             
             # Aggiungi metadati preparazione
@@ -273,17 +289,18 @@ def add_wcs_to_file(input_file, output_file, logger):
             return True
             
     except Exception as e:
-        logger.error(f"✗ {filename}: {e}")
+        logger.error(f"✗ {os.path.basename(input_file)}: {e}")
         return False
 
 
 def extract_lith_data(filename, logger):
-    """Estrae dati LITH/HST."""
+    """Estrae dati LITH/HST con WCS esistente."""
     try:
         with fits.open(filename, mode='readonly') as hdul:
             sci_data = None
             sci_header = None
             
+            # Cerca estensione SCI o primo HDU con dati 2D
             if 'SCI' in hdul:
                 sci_data = hdul['SCI'].data
                 sci_header = hdul['SCI'].header
@@ -308,7 +325,7 @@ def extract_lith_data(filename, logger):
                 cd = wcs.wcs.cd
                 pixel_scale = np.sqrt(cd[0,0]**2 + cd[0,1]**2) * 3600
             except:
-                pixel_scale = 0.04
+                pixel_scale = 0.04  # Default per HST
             
             info = {
                 'shape': shape,
@@ -317,7 +334,7 @@ def extract_lith_data(filename, logger):
                 'pixel_scale': pixel_scale
             }
             
-            logger.info(f"✓ {os.path.basename(filename)}: {shape[1]}x{shape[0]}px, RA={ra:.4f}°, DEC={dec:.4f}°")
+            logger.info(f"✓ {os.path.basename(filename)}: {shape[1]}×{shape[0]}px, RA={ra:.4f}°, DEC={dec:.4f}°, scale={pixel_scale:.3f}\"/px")
             
             return sci_data, sci_header, info
             
@@ -326,17 +343,32 @@ def extract_lith_data(filename, logger):
         return None, None, None
 
 
-def process_osservatorio_folder(input_dir, output_dir, logger):
-    """Processa osservatorio convertendo coordinate in WCS."""
-    # Modificato per cercare ricorsivamente in tutte le sottocartelle
-    fits_files = glob.glob(os.path.join(input_dir, '**', '*.fit'), recursive=True) + \
-                 glob.glob(os.path.join(input_dir, '**', '*.fits'), recursive=True)
+# ============================================================================
+# PROCESSING FUNCTIONS
+# ============================================================================
+
+def process_local_images(target_object, logger):
+    """Processa immagini local (osservatorio) per l'oggetto target."""
+    input_dir = os.path.join(BASE_DIR, 'local_raw', target_object)
+    output_dir = os.path.join(BASE_DIR, 'img_converted_wcs', 'local', target_object)
     
-    if not fits_files:
-        logger.warning(f"Nessun file in {input_dir}")
+    if not os.path.exists(input_dir):
+        logger.warning(f"Directory input non trovata: {input_dir}")
         return 0, 0, None
     
-    logger.info(f"Trovati {len(fits_files)} file osservatorio")
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Trova file FITS
+    fits_files = (glob.glob(os.path.join(input_dir, '*.fit')) + 
+                  glob.glob(os.path.join(input_dir, '*.fits')) +
+                  glob.glob(os.path.join(input_dir, '*.FIT')) +
+                  glob.glob(os.path.join(input_dir, '*.FITS')))
+    
+    if not fits_files:
+        logger.warning(f"Nessun file FITS in {input_dir}")
+        return 0, 0, None
+    
+    logger.info(f"Trovati {len(fits_files)} file local per {target_object}")
     
     prepared_count = 0
     failed_count = 0
@@ -344,11 +376,11 @@ def process_osservatorio_folder(input_dir, output_dir, logger):
     dec_list = []
     scale_list = []
     
-    with tqdm(total=len(fits_files), desc="  Osservatorio", unit="file") as pbar:
+    with tqdm(total=len(fits_files), desc=f"  Local/{target_object}", unit="file") as pbar:
         for input_file in fits_files:
             basename = os.path.basename(input_file)
             name, ext = os.path.splitext(basename)
-            output_file = os.path.join(output_dir, f"{name}_wcs.fits")
+            output_file = os.path.join(output_dir, f"{name}.fits")
             
             success = add_wcs_to_file(input_file, output_file, logger)
             
@@ -381,16 +413,28 @@ def process_osservatorio_folder(input_dir, output_dir, logger):
     return prepared_count, failed_count, stats
 
 
-def process_lith_folder(input_dir, output_dir, logger):
-    """Processa LITH/HST."""
-    # Modificato per cercare ricorsivamente in tutte le sottocartelle
-    fits_files = glob.glob(os.path.join(input_dir, '**', '*.fit'), recursive=True) + \
-                 glob.glob(os.path.join(input_dir, '**', '*.fits'), recursive=True)
+def process_light_images(target_object, logger):
+    """Processa immagini light (HST/Hubble) per l'oggetto target."""
+    input_dir = os.path.join(BASE_DIR, 'img_lights', target_object)
+    output_dir = os.path.join(BASE_DIR, 'img_converted_wcs', 'hubble', target_object)
     
-    if not fits_files:
+    if not os.path.exists(input_dir):
+        logger.warning(f"Directory input non trovata: {input_dir}")
         return 0, 0, None
     
-    logger.info(f"Trovati {len(fits_files)} file LITH")
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Trova file FITS
+    fits_files = (glob.glob(os.path.join(input_dir, '*.fit')) + 
+                  glob.glob(os.path.join(input_dir, '*.fits')) +
+                  glob.glob(os.path.join(input_dir, '*.FIT')) +
+                  glob.glob(os.path.join(input_dir, '*.FITS')))
+    
+    if not fits_files:
+        logger.warning(f"Nessun file FITS in {input_dir}")
+        return 0, 0, None
+    
+    logger.info(f"Trovati {len(fits_files)} file light per {target_object}")
     
     prepared_count = 0
     failed_count = 0
@@ -398,20 +442,21 @@ def process_lith_folder(input_dir, output_dir, logger):
     dec_list = []
     scale_list = []
     
-    with tqdm(total=len(fits_files), desc="  LITH", unit="file") as pbar:
+    with tqdm(total=len(fits_files), desc=f"  Light/{target_object}", unit="file") as pbar:
         for input_file in fits_files:
             data, header, info = extract_lith_data(input_file, logger)
             
             if data is not None:
                 basename = os.path.basename(input_file)
                 name, ext = os.path.splitext(basename)
-                output_file = os.path.join(output_dir, f"{name}_wcs.fits")
+                output_file = os.path.join(output_dir, f"{name}.fits")
                 
                 try:
                     primary_hdu = fits.PrimaryHDU(data=data, header=header)
                     primary_hdu.header['ORIGINAL'] = basename
                     primary_hdu.header['PREPDATE'] = datetime.now().isoformat()
-                    primary_hdu.header['SOURCE'] = 'lith'
+                    primary_hdu.header['SOURCE'] = 'light'
+                    primary_hdu.header['TARGET'] = target_object
                     
                     primary_hdu.writeto(output_file, overwrite=True, output_verify='silentfix')
                     
@@ -420,7 +465,7 @@ def process_lith_folder(input_dir, output_dir, logger):
                     dec_list.append(info['dec'])
                     scale_list.append(info['pixel_scale'])
                 except Exception as e:
-                    logger.error(f"Errore {basename}: {e}")
+                    logger.error(f"Errore salvando {basename}: {e}")
                     failed_count += 1
             else:
                 failed_count += 1
@@ -438,95 +483,98 @@ def process_lith_folder(input_dir, output_dir, logger):
     return prepared_count, failed_count, stats
 
 
+# ============================================================================
+# MAIN
+# ============================================================================
+
 def main():
     """Funzione principale."""
-    # Rimosso input interattivo
-    # TARGET_NAME = input("Inserisci il nome del target (es. M33, M31): ")
-    # ...
-    # TARGET_NAME = TARGET_NAME.strip()
-    
-    logger = setup_logging()
-    logger.info("=" * 60)
-    logger.info(f"PREPARAZIONE: CONVERSIONE WCS DA COORDINATE (Tutti i target)")
-    logger.info("=" * 60)
-    
     print("=" * 70)
-    print(f"🔭 PREPARAZIONE: CONVERSIONE COORDINATE → WCS (Tutti i target)".center(70))
+    print("🔭 STEP 1: CONVERSIONE COORDINATE → WCS".center(70))
     print("=" * 70)
     
-    # I percorsi di input sono ora definiti globalmente
-    print(f"\nInput Osservatorio (ricorsivo): {INPUT_OSSERVATORIO}")
-    print(f"Input LITH/HST (ricorsivo): {INPUT_LITH}")
+    # Carica configurazione
+    try:
+        config = load_config()
+        target_object = config['target_object']
+    except Exception as e:
+        print(f"\n❌ ERRORE: {e}")
+        print("\nEsegui prima: python scripts/step0_set_target_object.py")
+        return
     
-    # Setup
-    os.makedirs(OUTPUT_OSSERVATORIO, exist_ok=True)
-    os.makedirs(OUTPUT_LITH, exist_ok=True)
+    print(f"\n🎯 Oggetto target: {target_object}")
+    print(f"   (da config.json)")
     
-    # OSSERVATORIO
-    print("\n📡 OSSERVATORIO (Conversione OBJCTRA/OBJCTDEC → WCS)")
+    # Setup logging
+    logger = setup_logging(target_object)
+    logger.info("=" * 60)
+    logger.info(f"STEP 1: CONVERSIONE WCS - {target_object}")
+    logger.info("=" * 60)
     
-    prep_oss, fail_oss, stats_oss = process_osservatorio_folder(
-        INPUT_OSSERVATORIO,
-        OUTPUT_OSSERVATORIO,
-        logger
-    )
+    # Percorsi
+    print(f"\n� Struttura output:")
+    print(f"   Local:  data/img_converted_wcs/local/{target_object}/")
+    print(f"   Light:  data/img_converted_wcs/hubble/{target_object}/")
     
-    print(f"\n   ✓ Processati: {prep_oss}")
-    print(f"   ✗ Falliti: {fail_oss}")
+    # Process LOCAL images
+    print(f"\n📡 LOCAL (Osservatorio): Conversione OBJCTRA/OBJCTDEC → WCS")
+    prep_local, fail_local, stats_local = process_local_images(target_object, logger)
     
-    if stats_oss:
-        ra_min, ra_max = stats_oss['ra_range']
-        dec_min, dec_max = stats_oss['dec_range']
+    print(f"\n   ✓ Processati: {prep_local}")
+    print(f"   ✗ Falliti: {fail_local}")
+    
+    if stats_local:
+        ra_min, ra_max = stats_local['ra_range']
+        dec_min, dec_max = stats_local['dec_range']
         print(f"\n   📊 Campo:")
         print(f"      RA: {ra_min:.4f}° → {ra_max:.4f}° (span: {ra_max-ra_min:.4f}°)")
         print(f"      DEC: {dec_min:.4f}° → {dec_max:.4f}° (span: {dec_max-dec_min:.4f}°)")
-        print(f"      Scala media: {stats_oss['avg_scale']:.3f}\"/px")
+        print(f"      Scala media: {stats_local['avg_scale']:.3f}\"/px")
     
-    # LITH
-    print("\n🛰️  LITH/HST (Estrazione WCS esistente)")
+    # Process LIGHT images
+    print(f"\n🛰️  LIGHT (HST/Hubble): Estrazione WCS esistente")
+    prep_light, fail_light, stats_light = process_light_images(target_object, logger)
     
-    prep_lith, fail_lith, stats_lith = process_lith_folder(
-        INPUT_LITH,
-        OUTPUT_LITH,
-        logger
-    )
+    print(f"\n   ✓ Processati: {prep_light}")
+    print(f"   ✗ Falliti: {fail_light}")
     
-    print(f"\n   ✓ Processati: {prep_lith}")
-    print(f"   ✗ Falliti: {fail_lith}")
-    
-    if stats_lith:
-        ra_min, ra_max = stats_lith['ra_range']
-        dec_min, dec_max = stats_lith['dec_range']
+    if stats_light:
+        ra_min, ra_max = stats_light['ra_range']
+        dec_min, dec_max = stats_light['dec_range']
         print(f"\n   📊 Campo:")
         print(f"      RA: {ra_min:.4f}° → {ra_max:.4f}° (span: {ra_max-ra_min:.4f}°)")
         print(f"      DEC: {dec_min:.4f}° → {dec_max:.4f}° (span: {dec_max-dec_min:.4f}°)")
-        print(f"      Scala media: {stats_lith['avg_scale']:.3f}\"/px")
+        print(f"      Scala media: {stats_light['avg_scale']:.3f}\"/px")
     
     # RIEPILOGO
-    total_prep = prep_oss + prep_lith
-    total_fail = fail_oss + fail_lith
+    total_prep = prep_local + prep_light
+    total_fail = fail_local + fail_light
     
     print("\n" + "=" * 70)
     print("📊 RIEPILOGO")
     print("=" * 70)
-    print(f"   Osservatorio: {prep_oss} OK, {fail_oss} falliti")
-    print(f"   LITH: {prep_lith} OK, {fail_lith} falliti")
+    print(f"   Oggetto: {target_object}")
+    print(f"   Local: {prep_local} OK, {fail_local} falliti")
+    print(f"   Hubble: {prep_light} OK, {fail_light} falliti")
     print(f"   TOTALE: {total_prep} preparati, {total_fail} falliti")
     
     logger.info(f"Totale: {total_prep} preparati, {total_fail} falliti")
     
     if total_prep > 0:
-        print(f"\n✅ COMPLETATO!")
+        print(f"\n✅ STEP 1 COMPLETATO!")
         print(f"\n   📁 File con WCS in:")
-        print(f"      • {OUTPUT_OSSERVATORIO}")
-        print(f"      • {OUTPUT_LITH}")
-        print(f"\n   ➡️  Prossimo passo: Esegui step 2 e 3")
+        print(f"      • data/img_converted_wcs/local/{target_object}/")
+        print(f"      • data/img_converted_wcs/hubble/{target_object}/")
+        print(f"\n   ➡️  Prossimo passo: python scripts/step2_analize.py")
     else:
-        print(f"\n⚠️ Nessun file processato.")
+        print(f"\n⚠️  Nessun file processato per {target_object}")
+        print(f"   Verifica che le immagini siano in:")
+        print(f"      • data/local_raw/{target_object}/")
+        print(f"      • data/img_lights/{target_object}/")
 
 
 if __name__ == "__main__":
     start_time = time.time()
     main()
     elapsed = time.time() - start_time
-    print(f"\n⏱️ Tempo: {elapsed:.2f}s")
+    print(f"\n⏱️  Tempo: {elapsed:.2f}s")
