@@ -10,12 +10,7 @@ __pycache__/
 
 # === DATI ELABORATI (Auto-generati) ===
 # IMPORTANTE: img_lights_1/ deve essere inclusa per Git LFS!
-data/img_plate_2/
-data/img_register_4/
-data/img_preprocessed/
-data/local_processed/
-data/dataset_sr_patches/
-data/results/
+data/
 
 # === LOGS E CACHE ===
 logs/

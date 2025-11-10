@@ -1,13 +1,13 @@
 """
 STEP 1: PREPARAZIONE IMMAGINI - CONVERSIONE WCS
 Converte coordinate esistenti (OBJCTRA/OBJCTDEC) in WCS standard
-Legge la configurazione da config.json (creato da step0)
+Processa TUTTI gli oggetti trovati nelle cartelle input
+Output organizzato per fonte/oggetto per integrazione con step2
 """
 
 import os
 import glob
 import time
-import json
 import logging
 from datetime import datetime
 from astropy.io import fits
@@ -41,43 +41,24 @@ else:
 # Definisci i percorsi principali
 BASE_DIR = os.path.join(PROJECT_ROOT, 'data')
 LOG_DIR = os.path.join(PROJECT_ROOT, 'logs')
-CONFIG_FILE = os.path.join(PROJECT_ROOT, 'config.json')
 
-# ============================================================================
-# LETTURA CONFIGURAZIONE
-# ============================================================================
-
-def load_config():
-    """Carica configurazione da config.json creato da step0"""
-    if not os.path.exists(CONFIG_FILE):
-        raise FileNotFoundError(
-            f"File config.json non trovato in {PROJECT_ROOT}\n"
-            "Esegui prima: python scripts/step0_set_target_object.py"
-        )
-    
-    try:
-        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            config = json.load(f)
-        
-        if 'target_object' not in config:
-            raise ValueError("Chiave 'target_object' mancante in config.json")
-        
-        return config
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Errore parsing config.json: {e}")
-
+# Output: organizzato per fonte/oggetto (compatibile con step2)
+OUTPUT_WCS_DIR = os.path.join(BASE_DIR, 'img_converted_wcs')
 
 # ============================================================================
 # LOGGING
 # ============================================================================
 
-def setup_logging(target_object):
-    """Configura logging per l'oggetto specifico."""
-    log_dir = os.path.join(LOG_DIR, target_object)
-    os.makedirs(log_dir, exist_ok=True)
+def setup_logging():
+    """Configura logging generale."""
+    os.makedirs(LOG_DIR, exist_ok=True)
     
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_filename = os.path.join(log_dir, f'step1_convert_wcs_{timestamp}.log')
+    log_filename = os.path.join(LOG_DIR, f'step1_convert_wcs_{timestamp}.log')
+    
+    # Clear existing handlers
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
     
     logging.basicConfig(
         level=logging.INFO,
@@ -87,7 +68,13 @@ def setup_logging(target_object):
             logging.StreamHandler()
         ]
     )
-    return logging.getLogger(__name__)
+    
+    logger = logging.getLogger(__name__)
+    logger.info("=" * 80)
+    logger.info(f"LOG FILE: {log_filename}")
+    logger.info("=" * 80)
+    
+    return logger
 
 
 # ============================================================================
@@ -212,7 +199,7 @@ def create_wcs_from_header(header, data_shape):
         return None
 
 
-def add_wcs_to_file(input_file, output_file, logger):
+def add_wcs_to_file(input_file, output_file, target_object, logger):
     """
     Aggiunge WCS a un file FITS che ha OBJCTRA/OBJCTDEC.
     
@@ -234,57 +221,65 @@ def add_wcs_to_file(input_file, output_file, logger):
             existing_wcs = WCS(header)
             if existing_wcs.has_celestial:
                 logger.info(f"✓ {filename}: WCS già presente")
-                hdul.writeto(output_file, overwrite=True)
-                return True
+                # Copia comunque per aggiungere metadati
+                data_to_save = data
+                header_to_save = header
+            else:
+                # Crea WCS da OBJCTRA/OBJCTDEC
+                wcs = create_wcs_from_header(header, data.shape)
+                
+                if wcs is None:
+                    logger.warning(f"Impossibile creare WCS per {filename}")
+                    return False
+                
+                # Aggiungi WCS all'header
+                wcs_header = wcs.to_header()
+                
+                # Mantieni campi importanti originali
+                important_keys = ['SIMPLE', 'BITPIX', 'NAXIS', 'NAXIS1', 'NAXIS2',
+                                'BZERO', 'BSCALE', 'DATE-OBS', 'EXPTIME', 'FILTER',
+                                'INSTRUME', 'TELESCOP', 'XBINNING', 'YBINNING',
+                                'XPIXSZ', 'YPIXSZ', 'GAIN', 'CCD-TEMP', 'FOCALLEN']
+                
+                # Crea nuovo header combinato
+                new_header = fits.Header()
+                
+                for key in important_keys:
+                    if key in header:
+                        new_header[key] = header[key]
+                
+                new_header.update(wcs_header)
+                
+                # Aggiungi metadati preparazione
+                new_header['WCSADDED'] = True
+                new_header['WCSSRC'] = 'OBJCTRA/OBJCTDEC conversion'
+                new_header['WCSDATE'] = datetime.now().isoformat()
+                
+                # Copia coordinate originali per riferimento
+                if 'OBJCTRA' in header:
+                    new_header['ORIGOBJR'] = header['OBJCTRA']
+                if 'OBJCTDEC' in header:
+                    new_header['ORIGOBJD'] = header['OBJCTDEC']
+                
+                data_to_save = data
+                header_to_save = new_header
+                
+                # Log info
+                ra_deg, dec_deg = wcs.wcs.crval
+                pixel_scale_arcsec = abs(wcs.wcs.cdelt[0]) * 3600
+                logger.info(f"✓ {filename}: WCS creato - RA={ra_deg:.4f}°, DEC={dec_deg:.4f}°, scale={pixel_scale_arcsec:.3f}\"/px")
             
-            # Crea WCS da OBJCTRA/OBJCTDEC
-            wcs = create_wcs_from_header(header, data.shape)
-            
-            if wcs is None:
-                logger.warning(f"Impossibile creare WCS per {filename}")
-                return False
-            
-            # Aggiungi WCS all'header
-            wcs_header = wcs.to_header()
-            
-            # Mantieni campi importanti originali
-            important_keys = ['SIMPLE', 'BITPIX', 'NAXIS', 'NAXIS1', 'NAXIS2',
-                            'BZERO', 'BSCALE', 'DATE-OBS', 'EXPTIME', 'FILTER',
-                            'INSTRUME', 'TELESCOP', 'XBINNING', 'YBINNING',
-                            'XPIXSZ', 'YPIXSZ', 'GAIN', 'CCD-TEMP', 'FOCALLEN']
-            
-            # Crea nuovo header combinato
-            new_header = fits.Header()
-            
-            for key in important_keys:
-                if key in header:
-                    new_header[key] = header[key]
-            
-            new_header.update(wcs_header)
-            
-            # Aggiungi metadati preparazione
-            new_header['WCSADDED'] = True
-            new_header['WCSSRC'] = 'OBJCTRA/OBJCTDEC conversion'
-            new_header['WCSDATE'] = datetime.now().isoformat()
-            
-            # Copia coordinate originali per riferimento
-            if 'OBJCTRA' in header:
-                new_header['ORIGOBJR'] = header['OBJCTRA']
-            if 'OBJCTDEC' in header:
-                new_header['ORIGOBJD'] = header['OBJCTDEC']
+            # Aggiungi metadati target
+            header_to_save['TARGET'] = target_object
+            header_to_save['SOURCE'] = 'local'
+            header_to_save['PREPDATE'] = datetime.now().isoformat()
             
             # Salva
-            fits.PrimaryHDU(data=data, header=new_header).writeto(
+            fits.PrimaryHDU(data=data_to_save, header=header_to_save).writeto(
                 output_file,
                 overwrite=True,
                 output_verify='silentfix'
             )
-            
-            # Log info
-            ra_deg, dec_deg = wcs.wcs.crval
-            pixel_scale_arcsec = abs(wcs.wcs.cdelt[0]) * 3600
-            
-            logger.info(f"✓ {filename}: WCS creato - RA={ra_deg:.4f}°, DEC={dec_deg:.4f}°, scale={pixel_scale_arcsec:.3f}\"/px")
             
             return True
             
@@ -293,8 +288,8 @@ def add_wcs_to_file(input_file, output_file, logger):
         return False
 
 
-def extract_lith_data(filename, logger):
-    """Estrae dati LITH/HST con WCS esistente."""
+def extract_hubble_data(filename, target_object, logger):
+    """Estrae dati Hubble con WCS esistente."""
     try:
         with fits.open(filename, mode='readonly') as hdul:
             sci_data = None
@@ -312,10 +307,12 @@ def extract_lith_data(filename, logger):
                         break
             
             if sci_data is None:
+                logger.warning(f"Nessun dato 2D in {os.path.basename(filename)}")
                 return None, None, None
             
             wcs = WCS(sci_header)
             if not wcs.has_celestial:
+                logger.warning(f"WCS non valido in {os.path.basename(filename)}")
                 return None, None, None
             
             shape = sci_data.shape
@@ -344,16 +341,52 @@ def extract_lith_data(filename, logger):
 
 
 # ============================================================================
+# DISCOVERY OGGETTI
+# ============================================================================
+
+def discover_objects():
+    """Scopre automaticamente tutti gli oggetti nelle cartelle input."""
+    objects = set()
+    
+    # Cerca in local_raw
+    local_raw_dir = os.path.join(BASE_DIR, 'local_raw')
+    if os.path.exists(local_raw_dir):
+        for item in os.listdir(local_raw_dir):
+            item_path = os.path.join(local_raw_dir, item)
+            if os.path.isdir(item_path):
+                objects.add(item)
+    
+    # Cerca in img_lights
+    img_lights_dir = os.path.join(BASE_DIR, 'img_lights')
+    if os.path.exists(img_lights_dir):
+        for item in os.listdir(img_lights_dir):
+            item_path = os.path.join(img_lights_dir, item)
+            if os.path.isdir(item_path):
+                objects.add(item)
+    
+    return sorted(list(objects))
+
+
+# ============================================================================
 # PROCESSING FUNCTIONS
 # ============================================================================
 
 def process_local_images(target_object, logger):
     """Processa immagini local (osservatorio) per l'oggetto target."""
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info(f"📡 PROCESSING LOCAL IMAGES: {target_object}")
+    logger.info("=" * 80)
+    
     input_dir = os.path.join(BASE_DIR, 'local_raw', target_object)
-    output_dir = os.path.join(BASE_DIR, 'img_converted_wcs', 'local', target_object)
+    output_dir = os.path.join(OUTPUT_WCS_DIR, 'local', target_object)
+    
+    logger.info(f"Input:  {input_dir}")
+    logger.info(f"Output: {output_dir}")
+    logger.info("")
     
     if not os.path.exists(input_dir):
-        logger.warning(f"Directory input non trovata: {input_dir}")
+        logger.warning(f"⚠️  Directory input non trovata: {input_dir}")
         return 0, 0, None
     
     os.makedirs(output_dir, exist_ok=True)
@@ -365,10 +398,11 @@ def process_local_images(target_object, logger):
                   glob.glob(os.path.join(input_dir, '*.FITS')))
     
     if not fits_files:
-        logger.warning(f"Nessun file FITS in {input_dir}")
+        logger.warning(f"⚠️  Nessun file FITS in {input_dir}")
         return 0, 0, None
     
-    logger.info(f"Trovati {len(fits_files)} file local per {target_object}")
+    logger.info(f"📊 Trovati {len(fits_files)} file FITS")
+    logger.info("")
     
     prepared_count = 0
     failed_count = 0
@@ -382,7 +416,7 @@ def process_local_images(target_object, logger):
             name, ext = os.path.splitext(basename)
             output_file = os.path.join(output_dir, f"{name}.fits")
             
-            success = add_wcs_to_file(input_file, output_file, logger)
+            success = add_wcs_to_file(input_file, output_file, target_object, logger)
             
             if success:
                 try:
@@ -402,24 +436,47 @@ def process_local_images(target_object, logger):
             
             pbar.update(1)
     
+    logger.info("")
+    logger.info(f"✅ Successi: {prepared_count}")
+    logger.info(f"❌ Errori: {failed_count}")
+    
     stats = None
     if ra_list:
+        ra_min, ra_max = min(ra_list), max(ra_list)
+        dec_min, dec_max = min(dec_list), max(dec_list)
+        avg_scale = np.mean(scale_list)
+        
         stats = {
-            'ra_range': (min(ra_list), max(ra_list)),
-            'dec_range': (min(dec_list), max(dec_list)),
-            'avg_scale': np.mean(scale_list)
+            'ra_range': (ra_min, ra_max),
+            'dec_range': (dec_min, dec_max),
+            'avg_scale': avg_scale
         }
+        
+        logger.info("")
+        logger.info("📐 STATISTICHE CAMPO:")
+        logger.info(f"  RA:  {ra_min:.6f}° → {ra_max:.6f}° (span: {(ra_max-ra_min)*60:.2f}')")
+        logger.info(f"  DEC: {dec_min:.6f}° → {dec_max:.6f}° (span: {(dec_max-dec_min)*60:.2f}')")
+        logger.info(f"  Scala media: {avg_scale:.3f}\"/px")
     
     return prepared_count, failed_count, stats
 
 
-def process_light_images(target_object, logger):
-    """Processa immagini light (HST/Hubble) per l'oggetto target."""
+def process_hubble_images(target_object, logger):
+    """Processa immagini Hubble per l'oggetto target."""
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info(f"🛰️  PROCESSING HUBBLE IMAGES: {target_object}")
+    logger.info("=" * 80)
+    
     input_dir = os.path.join(BASE_DIR, 'img_lights', target_object)
-    output_dir = os.path.join(BASE_DIR, 'img_converted_wcs', 'hubble', target_object)
+    output_dir = os.path.join(OUTPUT_WCS_DIR, 'hubble', target_object)
+    
+    logger.info(f"Input:  {input_dir}")
+    logger.info(f"Output: {output_dir}")
+    logger.info("")
     
     if not os.path.exists(input_dir):
-        logger.warning(f"Directory input non trovata: {input_dir}")
+        logger.warning(f"⚠️  Directory input non trovata: {input_dir}")
         return 0, 0, None
     
     os.makedirs(output_dir, exist_ok=True)
@@ -431,10 +488,11 @@ def process_light_images(target_object, logger):
                   glob.glob(os.path.join(input_dir, '*.FITS')))
     
     if not fits_files:
-        logger.warning(f"Nessun file FITS in {input_dir}")
+        logger.warning(f"⚠️  Nessun file FITS in {input_dir}")
         return 0, 0, None
     
-    logger.info(f"Trovati {len(fits_files)} file light per {target_object}")
+    logger.info(f"📊 Trovati {len(fits_files)} file FITS")
+    logger.info("")
     
     prepared_count = 0
     failed_count = 0
@@ -442,9 +500,9 @@ def process_light_images(target_object, logger):
     dec_list = []
     scale_list = []
     
-    with tqdm(total=len(fits_files), desc=f"  Light/{target_object}", unit="file") as pbar:
+    with tqdm(total=len(fits_files), desc=f"  Hubble/{target_object}", unit="file") as pbar:
         for input_file in fits_files:
-            data, header, info = extract_lith_data(input_file, logger)
+            data, header, info = extract_hubble_data(input_file, target_object, logger)
             
             if data is not None:
                 basename = os.path.basename(input_file)
@@ -455,7 +513,7 @@ def process_light_images(target_object, logger):
                     primary_hdu = fits.PrimaryHDU(data=data, header=header)
                     primary_hdu.header['ORIGINAL'] = basename
                     primary_hdu.header['PREPDATE'] = datetime.now().isoformat()
-                    primary_hdu.header['SOURCE'] = 'light'
+                    primary_hdu.header['SOURCE'] = 'hubble'
                     primary_hdu.header['TARGET'] = target_object
                     
                     primary_hdu.writeto(output_file, overwrite=True, output_verify='silentfix')
@@ -472,13 +530,27 @@ def process_light_images(target_object, logger):
             
             pbar.update(1)
     
+    logger.info("")
+    logger.info(f"✅ Successi: {prepared_count}")
+    logger.info(f"❌ Errori: {failed_count}")
+    
     stats = None
     if ra_list:
+        ra_min, ra_max = min(ra_list), max(ra_list)
+        dec_min, dec_max = min(dec_list), max(dec_list)
+        avg_scale = np.mean(scale_list)
+        
         stats = {
-            'ra_range': (min(ra_list), max(ra_list)),
-            'dec_range': (min(dec_list), max(dec_list)),
-            'avg_scale': np.mean(scale_list)
+            'ra_range': (ra_min, ra_max),
+            'dec_range': (dec_min, dec_max),
+            'avg_scale': avg_scale
         }
+        
+        logger.info("")
+        logger.info("📐 STATISTICHE CAMPO:")
+        logger.info(f"  RA:  {ra_min:.6f}° → {ra_max:.6f}° (span: {(ra_max-ra_min)*60:.2f}')")
+        logger.info(f"  DEC: {dec_min:.6f}° → {dec_max:.6f}° (span: {(dec_max-dec_min)*60:.2f}')")
+        logger.info(f"  Scala media: {avg_scale:.3f}\"/px")
     
     return prepared_count, failed_count, stats
 
@@ -493,88 +565,116 @@ def main():
     print("🔭 STEP 1: CONVERSIONE COORDINATE → WCS".center(70))
     print("=" * 70)
     
-    # Carica configurazione
-    try:
-        config = load_config()
-        target_object = config['target_object']
-    except Exception as e:
-        print(f"\n❌ ERRORE: {e}")
-        print("\nEsegui prima: python scripts/step0_set_target_object.py")
+    # Setup logging
+    logger = setup_logging()
+    logger.info("=" * 80)
+    logger.info("STEP 1: CONVERSIONE WCS - TUTTI GLI OGGETTI")
+    logger.info("=" * 80)
+    logger.info(f"Data/Ora: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info("")
+    
+    # Scopri oggetti automaticamente
+    print(f"\n🔍 Ricerca automatica oggetti...")
+    objects = discover_objects()
+    
+    if not objects:
+        print(f"\n❌ Nessun oggetto trovato!")
+        print(f"   Verifica che le cartelle esistano:")
+        print(f"      • data/local_raw/OGGETTO/")
+        print(f"      • data/img_lights/OGGETTO/")
+        logger.error("Nessun oggetto trovato nelle directory input")
         return
     
-    print(f"\n🎯 Oggetto target: {target_object}")
-    print(f"   (da config.json)")
-    
-    # Setup logging
-    logger = setup_logging(target_object)
-    logger.info("=" * 60)
-    logger.info(f"STEP 1: CONVERSIONE WCS - {target_object}")
-    logger.info("=" * 60)
+    print(f"\n📦 Oggetti trovati: {', '.join(objects)}")
+    logger.info(f"Oggetti da processare: {', '.join(objects)}")
+    logger.info("")
     
     # Percorsi
-    print(f"\n� Struttura output:")
-    print(f"   Local:  data/img_converted_wcs/local/{target_object}/")
-    print(f"   Light:  data/img_converted_wcs/hubble/{target_object}/")
+    print(f"\n📁 Struttura output: data/img_converted_wcs/{{fonte}}/{{oggetto}}/")
     
-    # Process LOCAL images
-    print(f"\n📡 LOCAL (Osservatorio): Conversione OBJCTRA/OBJCTDEC → WCS")
-    prep_local, fail_local, stats_local = process_local_images(target_object, logger)
+    # Process tutti gli oggetti
+    total_prep_local = 0
+    total_fail_local = 0
+    total_prep_hubble = 0
+    total_fail_hubble = 0
     
-    print(f"\n   ✓ Processati: {prep_local}")
-    print(f"   ✗ Falliti: {fail_local}")
+    for obj_idx, target_object in enumerate(objects, 1):
+        print(f"\n{'='*70}")
+        print(f"📦 OGGETTO {obj_idx}/{len(objects)}: {target_object}")
+        print(f"{'='*70}")
+        
+        logger.info("=" * 80)
+        logger.info(f"OGGETTO {obj_idx}/{len(objects)}: {target_object}")
+        logger.info("=" * 80)
+        
+        # Process LOCAL
+        print(f"\n📡 LOCAL (Osservatorio)")
+        prep_local, fail_local, stats_local = process_local_images(target_object, logger)
+        
+        total_prep_local += prep_local
+        total_fail_local += fail_local
+        
+        print(f"   ✓ Processati: {prep_local}")
+        print(f"   ✗ Falliti: {fail_local}")
+        
+        if stats_local:
+            ra_min, ra_max = stats_local['ra_range']
+            dec_min, dec_max = stats_local['dec_range']
+            print(f"   📊 Campo: RA {(ra_max-ra_min)*60:.2f}' × DEC {(dec_max-dec_min)*60:.2f}', scala {stats_local['avg_scale']:.3f}\"/px")
+        
+        # Process HUBBLE
+        print(f"\n🛰️  HUBBLE")
+        prep_hubble, fail_hubble, stats_hubble = process_hubble_images(target_object, logger)
+        
+        total_prep_hubble += prep_hubble
+        total_fail_hubble += fail_hubble
+        
+        print(f"   ✓ Processati: {prep_hubble}")
+        print(f"   ✗ Falliti: {fail_hubble}")
+        
+        if stats_hubble:
+            ra_min, ra_max = stats_hubble['ra_range']
+            dec_min, dec_max = stats_hubble['dec_range']
+            print(f"   📊 Campo: RA {(ra_max-ra_min)*60:.2f}' × DEC {(dec_max-dec_min)*60:.2f}', scala {stats_hubble['avg_scale']:.3f}\"/px")
     
-    if stats_local:
-        ra_min, ra_max = stats_local['ra_range']
-        dec_min, dec_max = stats_local['dec_range']
-        print(f"\n   📊 Campo:")
-        print(f"      RA: {ra_min:.4f}° → {ra_max:.4f}° (span: {ra_max-ra_min:.4f}°)")
-        print(f"      DEC: {dec_min:.4f}° → {dec_max:.4f}° (span: {dec_max-dec_min:.4f}°)")
-        print(f"      Scala media: {stats_local['avg_scale']:.3f}\"/px")
-    
-    # Process LIGHT images
-    print(f"\n🛰️  LIGHT (HST/Hubble): Estrazione WCS esistente")
-    prep_light, fail_light, stats_light = process_light_images(target_object, logger)
-    
-    print(f"\n   ✓ Processati: {prep_light}")
-    print(f"   ✗ Falliti: {fail_light}")
-    
-    if stats_light:
-        ra_min, ra_max = stats_light['ra_range']
-        dec_min, dec_max = stats_light['dec_range']
-        print(f"\n   📊 Campo:")
-        print(f"      RA: {ra_min:.4f}° → {ra_max:.4f}° (span: {ra_max-ra_min:.4f}°)")
-        print(f"      DEC: {dec_min:.4f}° → {dec_max:.4f}° (span: {dec_max-dec_min:.4f}°)")
-        print(f"      Scala media: {stats_light['avg_scale']:.3f}\"/px")
-    
-    # RIEPILOGO
-    total_prep = prep_local + prep_light
-    total_fail = fail_local + fail_light
+    # RIEPILOGO TOTALE
+    total_prep = total_prep_local + total_prep_hubble
+    total_fail = total_fail_local + total_fail_hubble
     
     print("\n" + "=" * 70)
-    print("📊 RIEPILOGO")
+    print("📊 RIEPILOGO TOTALE")
     print("=" * 70)
-    print(f"   Oggetto: {target_object}")
-    print(f"   Local: {prep_local} OK, {fail_local} falliti")
-    print(f"   Hubble: {prep_light} OK, {fail_light} falliti")
+    print(f"   Oggetti processati: {len(objects)}")
+    print(f"   Local:  {total_prep_local} OK, {total_fail_local} falliti")
+    print(f"   Hubble: {total_prep_hubble} OK, {total_fail_hubble} falliti")
     print(f"   TOTALE: {total_prep} preparati, {total_fail} falliti")
     
-    logger.info(f"Totale: {total_prep} preparati, {total_fail} falliti")
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("📊 RIEPILOGO FINALE")
+    logger.info("=" * 80)
+    logger.info(f"Oggetti processati: {len(objects)}")
+    logger.info(f"Local:  {total_prep_local} OK, {total_fail_local} falliti")
+    logger.info(f"Hubble: {total_prep_hubble} OK, {total_fail_hubble} falliti")
+    logger.info(f"TOTALE: {total_prep} preparati, {total_fail} falliti")
+    logger.info(f"Data/Ora fine: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info("=" * 80)
     
     if total_prep > 0:
         print(f"\n✅ STEP 1 COMPLETATO!")
-        print(f"\n   📁 File con WCS in:")
-        print(f"      • data/img_converted_wcs/local/{target_object}/")
-        print(f"      • data/img_converted_wcs/hubble/{target_object}/")
-        print(f"\n   ➡️  Prossimo passo: python scripts/step2_analize.py")
+        print(f"\n   📁 File con WCS organizzati per fonte/oggetto in:")
+        print(f"      data/img_converted_wcs/")
+        print(f"\n   ➡️  Prossimo passo: python scripts/step2_register.py")
+        print(f"       (usa menu interattivo per scegliere fonte/oggetto)")
     else:
-        print(f"\n⚠️  Nessun file processato per {target_object}")
+        print(f"\n⚠️  Nessun file processato!")
         print(f"   Verifica che le immagini siano in:")
-        print(f"      • data/local_raw/{target_object}/")
-        print(f"      • data/img_lights/{target_object}/")
+        print(f"      • data/local_raw/{{oggetto}}/")
+        print(f"      • data/img_lights/{{oggetto}}/")
 
 
 if __name__ == "__main__":
     start_time = time.time()
     main()
     elapsed = time.time() - start_time
-    print(f"\n⏱️  Tempo: {elapsed:.2f}s")
+    print(f"\n⏱️  Tempo totale: {elapsed:.2f}s")
