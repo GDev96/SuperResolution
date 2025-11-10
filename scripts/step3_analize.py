@@ -1,5 +1,5 @@
 """
-STEP 2: CALCOLO DIMENSIONI PATCH (POST-REGISTRAZIONE)
+STEP 3: CALCOLO DIMENSIONI PATCH (POST-REGISTRAZIONE)
 Analizza le immagini registrate (da step2) per determinare dimensioni ottimali delle patch.
 Considera TUTTE le fonti (local + hubble) per ogni oggetto.
 

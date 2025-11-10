@@ -1,8 +1,8 @@
 """
-STEP 3: REGISTRAZIONE IMMAGINI (MIGLIORATO - MANTIENE RISOLUZIONE ORIGINALE)
+STEP 2: REGISTRAZIONE IMMAGINI (MIGLIORATO - MANTIENE RISOLUZIONE ORIGINALE)
 Allinea le immagini di una fonte specifica (Hubble o Local) su un'unica griglia WCS.
 MIGLIORIA: Ogni immagine mantiene la sua risoluzione nativa per massima qualità.
-NUOVO: Creazione automatica mosaico al termine della registrazione.
+NUOVO: Menu interattivo per creazione mosaico opzionale.
 
 Aggiunto: Menu interattivo per scegliere fonte e oggetto
 """
@@ -198,6 +198,29 @@ def interactive_menu():
     return selected_source, selected_object
 
 
+def ask_create_mosaic(num_images):
+    """Chiede se creare il mosaico dopo la registrazione."""
+    print("\n" + "=" * 70)
+    print("🖼️  CREAZIONE MOSAICO".center(70))
+    print("=" * 70)
+    print(f"\n   Registrazione completata con successo!")
+    print(f"   {num_images} immagini registrate disponibili.")
+    print("\n   💡 Il mosaico combina tutte le immagini in un'unica immagine.")
+    print("      • Usa la risoluzione migliore disponibile")
+    print("      • Combina con metodo median (robusto)")
+    print("      • Salva in: data/mosaics/")
+    print("\n" + "=" * 70)
+    
+    while True:
+        choice = input("\n➤ Vuoi creare il mosaico? [S/n]: ").strip().lower()
+        if choice in ['s', 'si', 'sì', 'y', 'yes', '']:
+            return True
+        elif choice in ['n', 'no']:
+            return False
+        else:
+            print("⚠️  Rispondi S (si) o N (no)")
+
+
 # ============================================================================
 # LOGGING
 # ============================================================================
@@ -206,10 +229,10 @@ def setup_logging(source, object_name=None):
     """Setup logging per fonte/oggetto specifico."""
     if object_name:
         log_subdir = os.path.join(LOG_DIR, source, object_name)
-        log_prefix = f"step3_register_{source}_{object_name}"
+        log_prefix = f"step2_register_{source}_{object_name}"
     else:
         log_subdir = os.path.join(LOG_DIR, source)
-        log_prefix = f"step3_register_{source}_all"
+        log_prefix = f"step2_register_{source}_all"
     
     os.makedirs(log_subdir, exist_ok=True)
     
@@ -815,6 +838,10 @@ def main():
     logger.info(f"Oggetto: {selected_object if selected_object else 'TUTTI'}")
     logger.info("")
     
+    # Inizializza variabili per riepilogo finale
+    mosaic_path = None
+    mosaics_created = []
+    
     # Determina percorsi
     if selected_object:
         # Singolo oggetto
@@ -846,8 +873,8 @@ def main():
             f"{selected_source}/{selected_object}", logger
         )
         
-        # Crea mosaico
-        if registered_files:
+        # FIXME: Chiedi se creare mosaico
+        if registered_files and ask_create_mosaic(len(registered_files)):
             mosaic_path = create_mosaic(
                 registered_files, 
                 selected_source, 
@@ -855,6 +882,9 @@ def main():
                 common_wcs, 
                 logger
             )
+        else:
+            print("\n⏭️  Creazione mosaico saltata.")
+            logger.info("⏭️  Creazione mosaico saltata dall'utente.")
         
         # Riepilogo
         print("\n" + "=" * 70)
@@ -886,6 +916,9 @@ def main():
         logger.info("")
         
         print(f"\n🔄 Registrazione di {len(objects)} oggetti...")
+        
+        # Chiedi una sola volta per tutti
+        create_mosaics = ask_create_mosaic(sum(count for _, count in objects))
         
         for obj_idx, (obj_name, img_count) in enumerate(objects, 1):
             print(f"\n{'─'*70}")
@@ -928,9 +961,13 @@ def main():
             total_success += success
             total_errors += errors
             
-            # Crea mosaico per questo oggetto
-            if registered_files:
-                create_mosaic(registered_files, selected_source, obj_name, common_wcs, logger)
+            # Crea mosaico se richiesto
+            if create_mosaics and registered_files:
+                mosaic_path_temp = create_mosaic(
+                    registered_files, selected_source, obj_name, common_wcs, logger
+                )
+                if mosaic_path_temp:
+                    mosaics_created.append(os.path.basename(mosaic_path_temp))
             
             logger.info(f"Oggetto {obj_name}: {success} OK, {errors} errori")
             logger.info("")
@@ -943,7 +980,9 @@ def main():
         print(f"   Oggetti processati: {len(objects)}")
         print(f"   Immagini registrate: {total_success}/{total_success+total_errors}")
         print(f"   Output: {OUTPUT_REGISTERED_DIR}/{selected_source}/")
-        print(f"   Mosaici: {OUTPUT_MOSAIC_DIR}/")
+        if mosaics_created:
+            print(f"   Mosaici creati: {len(mosaics_created)}")
+            print(f"   Salvati in: {OUTPUT_MOSAIC_DIR}/")
         
         logger.info("=" * 80)
         logger.info("✅ REGISTRAZIONE BATCH COMPLETATA")
@@ -951,7 +990,9 @@ def main():
         logger.info(f"Oggetti processati: {len(objects)}")
         logger.info(f"Totale immagini registrate: {total_success}/{total_success+total_errors}")
         logger.info(f"Output in: {OUTPUT_REGISTERED_DIR}/{selected_source}/")
-        logger.info(f"Mosaici in: {OUTPUT_MOSAIC_DIR}/")
+        if mosaics_created:
+            logger.info(f"Mosaici creati: {len(mosaics_created)}")
+            logger.info(f"Salvati in: {OUTPUT_MOSAIC_DIR}/")
     
     logger.info("")
     logger.info(f"Data/Ora fine: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -959,8 +1000,9 @@ def main():
     
     print(f"\n✅ STEP 3 COMPLETATO!")
     print(f"\n   📁 Immagini registrate: {OUTPUT_REGISTERED_DIR}/{selected_source}/")
-    print(f"   🖼️  Mosaici: {OUTPUT_MOSAIC_DIR}/")
-    print(f"\n   ➡️  Prossimo passo: python scripts/step2_calculate_patches.py")
+    if mosaic_path or mosaics_created:
+        print(f"   🖼️  Mosaici: {OUTPUT_MOSAIC_DIR}/")
+    print(f"\n   ➡️  Prossimo passo: python scripts/step4_patch.py")
 
 
 if __name__ == "__main__":
