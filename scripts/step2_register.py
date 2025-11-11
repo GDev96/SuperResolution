@@ -634,7 +634,7 @@ def register_images(wcs_info_list, common_wcs, output_dir, source_name, logger):
 # ============================================================================
 
 def create_mosaic(registered_files, source_name, object_name, common_wcs, logger):
-    """Crea mosaico dalle immagini registrate."""
+    """Crea mosaico dalle immagini registrate usando accumulatori (metodo robusto)."""
     if not registered_files:
         logger.warning("⚠️  Nessuna immagine registrata per creare mosaico")
         return None
@@ -649,42 +649,67 @@ def create_mosaic(registered_files, source_name, object_name, common_wcs, logger
     try:
         print(f"\n🖼️  Creazione mosaico da {len(registered_files)} immagini...")
         
-        # Carica tutte le immagini registrate
-        hdus = []
-        pixel_scales = []
+        # ============================================================
+        # STEP 1: ANALIZZA IMMAGINI E DETERMINA DIMENSIONI MOSAICO
+        # ============================================================
         
-        for filepath in tqdm(registered_files, desc="  Caricamento immagini", unit="img"):
+        pixel_scales = []
+        image_infos = []
+        
+        print("  Analisi immagini...")
+        for filepath in tqdm(registered_files, desc="  Analisi", unit="img"):
             try:
-                hdu = fits.open(filepath)[0]
-                hdus.append(hdu)
-                
-                # Estrai pixel scale
-                header = hdu.header
-                native_scale = header.get('NATIVESC', None)
-                if native_scale:
-                    pixel_scales.append(native_scale)
-                else:
-                    wcs = WCS(header)
-                    try:
-                        cd = wcs.wcs.cd
-                        scale = np.sqrt(cd[0,0]**2 + cd[0,1]**2) * 3600
-                        pixel_scales.append(scale)
-                    except:
-                        pixel_scales.append(abs(wcs.wcs.cdelt[0]) * 3600)
-                
+                with fits.open(filepath) as hdul:
+                    # Trova HDU con dati
+                    data_hdu = None
+                    for hdu in hdul:
+                        if hdu.data is not None and len(hdu.data.shape) == 2:
+                            data_hdu = hdu
+                            break
+                    
+                    if data_hdu is None:
+                        logger.warning(f"⚠️  Nessun HDU 2D in {os.path.basename(filepath)}")
+                        continue
+                    
+                    header = data_hdu.header
+                    
+                    # Estrai pixel scale
+                    native_scale = header.get('NATIVESC', None)
+                    if native_scale:
+                        pixel_scales.append(native_scale)
+                    else:
+                        wcs = WCS(header)
+                        try:
+                            cd = wcs.wcs.cd
+                            scale = np.sqrt(cd[0,0]**2 + cd[0,1]**2) * 3600
+                            pixel_scales.append(scale)
+                        except:
+                            pixel_scales.append(abs(wcs.wcs.cdelt[0]) * 3600)
+                    
+                    # Salva info per dopo
+                    image_infos.append({
+                        'path': filepath,
+                        'wcs': WCS(header),
+                        'shape': data_hdu.data.shape
+                    })
+                    
             except Exception as e:
-                logger.warning(f"⚠️  Errore caricando {os.path.basename(filepath)}: {e}")
+                logger.warning(f"⚠️  Errore analisi {os.path.basename(filepath)}: {e}")
                 continue
         
-        if not hdus:
-            logger.error("❌ Nessuna immagine caricata per il mosaico")
+        if not image_infos:
+            logger.error("❌ Nessuna immagine valida per il mosaico")
             return None
         
-        # Usa risoluzione migliore (pixel scale più piccolo)
+        # Usa risoluzione migliore
         best_scale = np.min(pixel_scales)
         logger.info(f"Risoluzione mosaico: {best_scale:.4f}\"/px (migliore disponibile)")
+        print(f"  ✓ Risoluzione: {best_scale:.4f}\"/px")
         
-        # Crea WCS per mosaico con risoluzione migliore
+        # ============================================================
+        # STEP 2: CREA WCS MOSAICO E CALCOLA DIMENSIONI
+        # ============================================================
+        
         mosaic_wcs = WCS(naxis=2)
         mosaic_wcs.wcs.crval = common_wcs.wcs.crval
         mosaic_wcs.wcs.ctype = common_wcs.wcs.ctype
@@ -693,16 +718,15 @@ def create_mosaic(registered_files, source_name, object_name, common_wcs, logger
         mosaic_wcs.wcs.radesys = 'ICRS'
         mosaic_wcs.wcs.equinox = 2000.0
         
-        # Calcola dimensioni mosaico
+        # Calcola boundaries totali
         logger.info("Calcolo footprint totale...")
         
         ra_min, ra_max = float('inf'), float('-inf')
         dec_min, dec_max = float('inf'), float('-inf')
         
-        for hdu in hdus:
-            wcs = WCS(hdu.header)
-            shape = hdu.data.shape
-            height, width = shape
+        for info in image_infos:
+            wcs = info['wcs']
+            height, width = info['shape']
             
             corners_x = [0, width-1, width-1, 0]
             corners_y = [0, 0, height-1, height-1]
@@ -732,61 +756,163 @@ def create_mosaic(registered_files, source_name, object_name, common_wcs, logger
         
         logger.info(f"Dimensioni mosaico: {mosaic_width}×{mosaic_height}px")
         logger.info(f"Campo: RA={ra_max-ra_min:.4f}°, DEC={dec_max-dec_min:.4f}°")
+        print(f"  ✓ Dimensioni: {mosaic_width}×{mosaic_height}px")
+        
+        # Memoria stimata
+        memory_gb = (mosaic_height * mosaic_width * 4 * 2) / (1024**3)
+        logger.info(f"Memoria stimata: ~{memory_gb:.1f} GB")
+        print(f"  ✓ Memoria: ~{memory_gb:.1f} GB")
+        
+        # ============================================================
+        # STEP 3: COMBINA IMMAGINI CON ACCUMULATORI (METODO ROBUSTO)
+        # ============================================================
+        
         logger.info("")
-        logger.info("Combinazione immagini (median)...")
+        logger.info("Combinazione immagini con accumulatori...")
+        print("\n  Combinazione immagini...")
         
-        # Usa reproject_and_coadd per creare mosaico
-        print("  Combinazione immagini...")
-        mosaic_data, footprint = reproject_and_coadd(
-            hdus,
-            mosaic_wcs,
-            shape_out=(mosaic_height, mosaic_width),
-            reproject_function=reproject_interp,
-            combine_function='median',
-            match_background=False
-        )
+        # Inizializza accumulatori
+        sum_array = np.zeros((mosaic_height, mosaic_width), dtype=np.float64)
+        count_array = np.zeros((mosaic_height, mosaic_width), dtype=np.int32)
         
-        # Chiudi HDU
-        for hdu in hdus:
+        valid_count = 0
+        
+        for info in tqdm(image_infos, desc="  Combinazione", unit="img"):
             try:
-                hdu.close()
-            except:
-                pass
+                with fits.open(info['path']) as hdul:
+                    # Trova HDU con dati
+                    data_hdu = None
+                    for hdu in hdul:
+                        if hdu.data is not None and len(hdu.data.shape) == 2:
+                            data_hdu = hdu
+                            break
+                    
+                    if data_hdu is None:
+                        continue
+                    
+                    data = data_hdu.data
+                    wcs = info['wcs']
+                    
+                    # Reproietta su griglia mosaico
+                    from reproject import reproject_interp
+                    
+                    reprojected, footprint = reproject_interp(
+                        (data, wcs),
+                        mosaic_wcs,
+                        shape_out=(mosaic_height, mosaic_width),
+                        order='bilinear'
+                    )
+                    
+                    # Trova pixel validi
+                    valid_mask = (
+                        np.isfinite(reprojected) & 
+                        (reprojected != 0) & 
+                        (footprint > 0)
+                    )
+                    
+                    n_valid = valid_mask.sum()
+                    coverage = (n_valid / (mosaic_height * mosaic_width)) * 100
+                    
+                    if coverage < 0.01:
+                        logger.warning(f"Coverage bassa ({coverage:.4f}%): {os.path.basename(info['path'])}")
+                        continue
+                    
+                    # Accumula
+                    sum_array[valid_mask] += reprojected[valid_mask]
+                    count_array[valid_mask] += 1
+                    
+                    valid_count += 1
+                    logger.debug(f"✓ {os.path.basename(info['path'])}: {n_valid:,} pixel ({coverage:.3f}%)")
+                    
+            except Exception as e:
+                logger.error(f"Errore {os.path.basename(info['path'])}: {e}")
+                continue
         
-        # Calcola statistiche mosaico
-        valid_pixels = np.sum(np.isfinite(mosaic_data))
-        total_pixels = mosaic_height * mosaic_width
-        coverage = (valid_pixels / total_pixels) * 100
+        if valid_count == 0:
+            logger.error("Nessuna immagine processata con successo!")
+            return None
+        
+        logger.info(f"Processate {valid_count}/{len(image_infos)} immagini")
+        print(f"\n  ✓ Processate: {valid_count}/{len(image_infos)} immagini")
+        
+        # ============================================================
+        # STEP 4: CALCOLA MOSAICO FINALE (MEDIA CON GESTIONE NaN)
+        # ============================================================
+        
+        print(f"\n  Calcolo mosaico finale...")
+        
+        with np.errstate(divide='ignore', invalid='ignore'):
+            mosaic_data = np.divide(
+                sum_array,
+                count_array,
+                out=np.full((mosaic_height, mosaic_width), np.nan, dtype=np.float32),
+                where=count_array > 0
+            )
+        
+        # ============================================================
+        # STEP 5: STATISTICHE
+        # ============================================================
+        
+        valid_pixels = np.isfinite(mosaic_data) & (mosaic_data != 0)
+        coverage_total = (valid_pixels.sum() / mosaic_data.size) * 100
         
         logger.info("")
         logger.info("📊 STATISTICHE MOSAICO:")
         logger.info(f"  Dimensioni: {mosaic_width}×{mosaic_height}px")
         logger.info(f"  Risoluzione: {best_scale:.4f}\"/px")
-        logger.info(f"  Coverage: {coverage:.1f}% ({valid_pixels}/{total_pixels} px)")
-        logger.info(f"  Valore min: {np.nanmin(mosaic_data):.2f}")
-        logger.info(f"  Valore max: {np.nanmax(mosaic_data):.2f}")
-        logger.info(f"  Valore medio: {np.nanmean(mosaic_data):.2f}")
+        logger.info(f"  Coverage: {coverage_total:.1f}%")
         
-        # Crea header
+        if valid_pixels.sum() > 0:
+            valid_data = mosaic_data[valid_pixels]
+            logger.info(f"  Valore min: {np.nanmin(valid_data):.2e}")
+            logger.info(f"  Valore max: {np.nanmax(valid_data):.2e}")
+            logger.info(f"  Valore medio: {np.nanmean(valid_data):.2e}")
+            
+            print(f"\n  📊 Statistiche:")
+            print(f"     Coverage: {coverage_total:.1f}%")
+            print(f"     Min: {np.nanmin(valid_data):.2e}")
+            print(f"     Max: {np.nanmax(valid_data):.2e}")
+            print(f"     Media: {np.nanmean(valid_data):.2e}")
+            
+            # Distribuzione sovrapposizioni
+            unique_counts = np.unique(count_array[count_array > 0])
+            logger.info("")
+            logger.info("  Distribuzione sovrapposizioni:")
+            for count in sorted(unique_counts):
+                n_pixels = (count_array == count).sum()
+                percent = (n_pixels / valid_pixels.sum()) * 100
+                logger.info(f"    {count} immagini: {n_pixels:,} px ({percent:.1f}%)")
+        
+        # ============================================================
+        # STEP 6: NORMALIZZAZIONE (opzionale - preserva dinamica)
+        # ============================================================
+        
+        # Converti NaN a 0 per compatibilità
+        mosaic_data[~valid_pixels] = 0.0
+        
+        # ============================================================
+        # STEP 7: SALVATAGGIO
+        # ============================================================
+        
         mosaic_header = mosaic_wcs.to_header()
         mosaic_header['OBJECT'] = object_name
         mosaic_header['SOURCE'] = source_name
-        mosaic_header['NIMAGES'] = (len(registered_files), 'Number of images combined')
-        mosaic_header['COMBMETH'] = ('median', 'Combination method')
+        mosaic_header['NIMAGES'] = (valid_count, 'Number of images combined')
+        mosaic_header['COMBMETH'] = ('mean_accumulator', 'Combination method')
         mosaic_header['PIXSCALE'] = (best_scale, 'Pixel scale (arcsec/px)')
-        mosaic_header['COVERAGE'] = (coverage, 'Coverage percentage')
+        mosaic_header['COVERAGE'] = (coverage_total, 'Coverage percentage')
         mosaic_header['MOSDATE'] = datetime.now().isoformat()
+        mosaic_header['CREATOR'] = 'step2_register.py'
         
-        # Nome file mosaico
+        # Nome file
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        mosaic_filename = f"mosaic_{source_name}_{object_name}_{timestamp}.fits"
+        mosaic_filename = f"mosaic_{source_name}_{object_name}_{valid_count}img_{timestamp}.fits"
         
-        # Salva mosaico
         os.makedirs(OUTPUT_MOSAIC_DIR, exist_ok=True)
         mosaic_path = os.path.join(OUTPUT_MOSAIC_DIR, mosaic_filename)
         
         logger.info("")
-        logger.info(f"💾 Salvataggio mosaico: {mosaic_filename}")
+        logger.info(f"💾 Salvataggio: {mosaic_filename}")
         
         fits.PrimaryHDU(data=mosaic_data, header=mosaic_header).writeto(
             mosaic_path,
@@ -795,20 +921,20 @@ def create_mosaic(registered_files, source_name, object_name, common_wcs, logger
         )
         
         logger.info(f"✅ Mosaico salvato: {mosaic_path}")
-        logger.info("")
         
         print(f"\n✅ Mosaico creato: {mosaic_filename}")
         print(f"   Dimensioni: {mosaic_width}×{mosaic_height}px @ {best_scale:.3f}\"/px")
-        print(f"   Coverage: {coverage:.1f}%")
+        print(f"   Coverage: {coverage_total:.1f}%")
+        print(f"   Immagini: {valid_count}")
         print(f"   Path: {mosaic_path}")
         
         return mosaic_path
         
     except Exception as e:
         logger.error(f"❌ Errore creando mosaico: {e}")
-        logger.debug("Traceback:", exc_info=True)
+        import traceback
+        logger.debug(f"Traceback:\n{traceback.format_exc()}")
         return None
-
 
 # ============================================================================
 # MAIN
