@@ -1,11 +1,12 @@
 """
-STEP 5: RITAGLIO IMMAGINI REGISTRATE
-Ritaglia tutte le immagini registrate alle dimensioni dell'immagine più piccola.
-Questo passo è necessario prima di creare il mosaico per garantire che tutte 
-le immagini abbiano le stesse dimensioni.
+STEP 3+4: RITAGLIO IMMAGINI REGISTRATE E CREAZIONE MOSAICO
+1. Ritaglia tutte le immagini registrate alle dimensioni dell'immagine più piccola
+2. Crea un mosaico (media) da tutte le immagini ritagliate
 
 INPUT: Cartelle '3_registered_native/hubble' e '3_registered_native/observatory'
-OUTPUT: Cartelle '4_cropped/hubble' e '4_cropped/observatory' con immagini ritagliate
+OUTPUT: 
+  - Cartelle '4_cropped/hubble' e '4_cropped/observatory' con immagini ritagliate
+  - File '5_mosaics/final_mosaic.fits' con il mosaico finale
 """
 
 import os
@@ -38,8 +39,12 @@ OUTPUT_DIRS = {
     'observatory': OUTPUT_DIR_BASE / 'observatory'
 }
 
+# Output: cartella e file per il mosaico finale
+MOSAIC_OUTPUT_DIR = Path(BASE_DIR) / '5_mosaics'
+MOSAIC_OUTPUT_FILE = MOSAIC_OUTPUT_DIR / 'final_mosaic.fits'
+
 # ============================================================================
-# FUNZIONI
+# FUNZIONI - RITAGLIO
 # ============================================================================
 
 def find_smallest_dimensions(all_files):
@@ -118,7 +123,7 @@ def crop_image(input_path, output_path, target_height, target_width):
             header['NAXIS2'] = target_height
             
             # Aggiungi informazioni sul ritaglio
-            header['HISTORY'] = 'Cropped by step5_crop.py'
+            header['HISTORY'] = 'Cropped by step3_crop_and_mosaic.py'
             header['CROPX'] = (x_offset, 'X offset for cropping')
             header['CROPY'] = (y_offset, 'Y offset for cropping')
             header['ORIGW'] = (current_width, 'Original width')
@@ -171,7 +176,7 @@ def crop_all_images():
     if not all_files:
         print(f"\n❌ ERRORE: Nessun file FITS trovato nelle cartelle di input.")
         print("   Assicurati di aver eseguito 'step3_register.py' prima.")
-        return
+        return False
     
     print(f"\n✅ Totale: {len(all_files)} file da ritagliare")
     
@@ -179,7 +184,7 @@ def crop_all_images():
     min_height, min_width = find_smallest_dimensions(all_files)
     
     # Conferma dimensioni (dovrebbero essere circa 1800px come menzionato)
-    print(f"\n📏 Le immagini verranno ritagliate a: {min_width} x {min_height} pixel")
+    print(f"\n📐 Le immagini verranno ritagliate a: {min_width} x {min_height} pixel")
     
     # 3. Ritaglia tutte le immagini
     print("\n✂️  Ritaglio in corso...\n")
@@ -210,14 +215,157 @@ def crop_all_images():
     print(f"\n   File salvati in:")
     for name, path in OUTPUT_DIRS.items():
         print(f"   - {name}: {path}")
+    
+    return success_count > 0
+
+
+# ============================================================================
+# FUNZIONI - MOSAICO
+# ============================================================================
+
+def create_mosaic():
+    """Crea il mosaico."""
+    print("\n" + "🖼️ "*35)
+    print("CREAZIONE MOSAICO DA IMMAGINI REGISTRATE".center(70))
+    print("🖼️ "*35)
+    
+    # Crea cartella output
+    MOSAIC_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    
+    # Cartelle con immagini ritagliate
+    REGISTERED_DIRS = [
+        OUTPUT_DIRS['hubble'],
+        OUTPUT_DIRS['observatory']
+    ]
+    
+    print(f"\n📂 Cartelle di input:")
+    for d in REGISTERED_DIRS:
+        print(f"   - {d}")
+    print(f"\n📂 File di output:")
+    print(f"   - {MOSAIC_OUTPUT_FILE}")
+    
+    # 1. Trova tutti i file FITS ritagliati
+    all_files = []
+    for d in REGISTERED_DIRS:
+        all_files.extend(glob.glob(str(d / '*.fits')))
+        all_files.extend(glob.glob(str(d / '*.fit')))
+        
+    if not all_files:
+        print(f"\n❌ ERRORE: Nessun file FITS trovato nelle cartelle di input.")
+        print("   Assicurati di aver completato il ritaglio prima.")
+        return False
+        
+    print(f"\n✅ Trovati {len(all_files)} file FITS da combinare.")
+    
+    # 2. Inizializza gli array per la media
+    # Prendi le dimensioni e l'header WCS dal primo file
+    try:
+        with fits.open(all_files[0]) as hdul:
+            template_header = hdul[0].header
+            shape = hdul[0].data.shape
+    except Exception as e:
+        print(f"\n❌ ERRORE: Impossibile leggere il primo file {all_files[0]}: {e}")
+        return False
+        
+    print(f"   Dimensioni mosaico: {shape[1]} x {shape[0]} pixel")
+    
+    # Array per sommare i valori (usa float64 per precisione)
+    total_flux = np.zeros(shape, dtype=np.float64)
+    # Array per contare quanti pixel validi ci sono in ogni punto
+    n_pixels = np.zeros(shape, dtype=np.int32)
+    
+    # 3. Itera su tutti i file e combinali
+    print("\n🔄 Combinazione immagini in corso...")
+    
+    for filepath in tqdm(all_files, desc="Combinazione", unit="file"):
+        try:
+            with fits.open(filepath) as hdul:
+                img_data = hdul[0].data
+                
+                # Assicurati che le dimensioni corrispondano
+                if img_data.shape != shape:
+                    print(f"\n⚠️  ATTENZIONE: {filepath} ha dimensioni {img_data.shape} diverse da {shape}. Saltato.")
+                    continue
+                    
+                # Trova pixel validi (non NaN)
+                valid_mask = ~np.isnan(img_data)
+                
+                # Sostituisci i NaN con 0 per la somma
+                img_data_no_nan = np.nan_to_num(img_data, nan=0.0, copy=False)
+                
+                # Aggiungi i valori all'array totale
+                total_flux += img_data_no_nan
+                
+                # Incrementa il contatore per i pixel validi
+                n_pixels[valid_mask] += 1
+                
+        except Exception as e:
+            print(f"\n⚠️  ATTENZIONE: Errore nel leggere {filepath}: {e}. Saltato.")
+            
+    # 4. Calcola la media finale
+    print("\n🧮 Calcolo della media finale...")
+    
+    # Inizializza il mosaico finale con NaN
+    mosaic_data = np.full(shape, np.nan, dtype=np.float32)
+    
+    # Trova dove abbiamo almeno un pixel (per evitare divisione per zero)
+    valid_stack = n_pixels > 0
+    
+    # Calcola la media solo dove n_pixels > 0
+    mosaic_data[valid_stack] = (total_flux[valid_stack] / n_pixels[valid_stack]).astype(np.float32)
+    
+    # 5. Salva il file FITS finale
+    print(f"\n💾 Salvataggio mosaico in {MOSAIC_OUTPUT_FILE}...")
+    
+    # Aggiorna l'header
+    template_header['HISTORY'] = 'Mosaico creato da step3_crop_and_mosaic.py'
+    template_header['NCOMBINE'] = (len(all_files), 'Numero di file combinati')
+    
+    try:
+        fits.PrimaryHDU(data=mosaic_data, header=template_header).writeto(MOSAIC_OUTPUT_FILE, overwrite=True)
+    except Exception as e:
+        print(f"\n❌ ERRORE: Impossibile salvare il file FITS finale: {e}")
+        return False
+
+    print(f"\n{'='*70}")
+    print("✅ MOSAICO COMPLETATO!")
+    print(f"{'='*70}")
+    print(f"   File salvato in: {MOSAIC_OUTPUT_FILE}")
+    
+    return True
 
 
 # ============================================================================
 # MAIN
 # ============================================================================
 
-if __name__ == "__main__":
+def main():
+    """Funzione principale che esegue ritaglio e creazione mosaico."""
+    print("\n" + "="*70)
+    print("PIPELINE: RITAGLIO IMMAGINI + CREAZIONE MOSAICO".center(70))
+    print("="*70)
+    
     start_time = time.time()
-    crop_all_images()
+    
+    # STEP 1: Ritaglio delle immagini
+    if not crop_all_images():
+        print("\n❌ Pipeline interrotta: errore durante il ritaglio.")
+        return
+    
+    print("\n\n")
+    
+    # STEP 2: Creazione del mosaico
+    if not create_mosaic():
+        print("\n❌ Pipeline interrotta: errore durante la creazione del mosaico.")
+        return
+    
+    # Riepilogo finale
     elapsed = time.time() - start_time
-    print(f"\n⏱️ Tempo totale: {elapsed:.1f} secondi")
+    print("\n" + "="*70)
+    print("✅ PIPELINE COMPLETATA CON SUCCESSO!")
+    print("="*70)
+    print(f"   ⏱️  Tempo totale: {elapsed:.1f} secondi ({elapsed/60:.1f} minuti)")
+
+
+if __name__ == "__main__":
+    main()
