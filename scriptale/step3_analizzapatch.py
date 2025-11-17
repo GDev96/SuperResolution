@@ -6,7 +6,13 @@ Script unificato che permette di:
 2. Eseguire solo l'estrazione patches (Step 6)
 3. Eseguire entrambi in sequenza (Analisi + Patch)
 
-Mantiene tutte le funzionalità e output degli script originali.
+MODIFICATO:
+- Aggiunto menu iniziale per selezionare la cartella del target (se avviato da solo).
+- Accetta BASE_DIR come argomento da riga di comando (se avviato da step2).
+- Tutti i percorsi sono ora relativi alla cartella del target selezionata (BASE_DIR).
+- Rimossi tutti i percorsi globali, ora vengono passati come argomenti.
+- Log directory allineata a quella di step1.
+- AGGIUNTO: Multi-threading per l'estrazione patches (Step 6)
 """
 
 import os
@@ -24,41 +30,19 @@ import astropy.units as u
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import warnings
-import shutil  # <-- MODIFICA: Aggiunto import
+import shutil
+import sys 
+import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed # <-- AGGIUNTO
 
 warnings.filterwarnings('ignore')
 
 # ============================================================================
-# CONFIGURAZIONE GLOBALE
+# CONFIGURAZIONE (SOLO PARAMETRI, NON PERCORSI)
 # ============================================================================
 
-BASE_DIR = r'F:\Super Revolt Gaia\parte 2(patch)\data'
-
-# Directory per Step 5 (Analisi)
-HUBBLE_DIR_ANALYSIS = Path(BASE_DIR) / '4_cropped' / 'hubble'
-OBS_DIR_ANALYSIS = Path(BASE_DIR) / '4_cropped' / 'observatory'
-OUTPUT_DIR_ANALYSIS = Path(BASE_DIR) / 'analisi_overlap'
-
-# Directory per Step 6 (Patch) - Input selezionabile
-INPUT_CROPPED_HUBBLE = Path(BASE_DIR) / '4_cropped' / 'hubble'
-INPUT_CROPPED_OBSERVATORY = Path(BASE_DIR) / '4_cropped' / 'observatory'
-INPUT_REGISTERED_HUBBLE = Path(BASE_DIR) / '3_registered_native' / 'hubble'
-INPUT_REGISTERED_OBSERVATORY = Path(BASE_DIR) / '3_registered_native' / 'observatory'
-
-# Directory per riepilogo pipeline
-INPUT_ORIG_HUBBLE = Path(BASE_DIR) / 'img_lights_1'
-INPUT_ORIG_OBSERVATORY = Path(BASE_DIR) / 'local_raw'
-INPUT_WCS_HUBBLE = Path(BASE_DIR) / 'lith_con_wcs'
-INPUT_WCS_OBSERVATORY = Path(BASE_DIR) / 'osservatorio_con_wcs'
-
-LOG_DIR = Path(r'F:\Super Revolt Gaia\logs')
-
-# Variabili globali per Step 6
-INPUT_HUBBLE = None
-INPUT_OBSERVATORY = None
-OUTPUT_DIR_PATCHES = None
-OUTPUT_HUBBLE_PATCHES = None
-OUTPUT_OBS_PATCHES = None
+# Percorso LOGS è ora fisso (come in step1)
+LOG_DIR_ROOT = Path(r'F:\Super Revolt Gaia\logs')
 
 # Parametri Step 5
 TARGET_PATCH_ARCMIN_ANALYSIS = 1.0
@@ -71,6 +55,62 @@ MIN_VALID_PERCENT = 50
 TRAIN_RATIO = 0.7
 VAL_RATIO = 0.15
 TEST_RATIO = 0.15
+NUM_THREADS = 5  # <-- AGGIUNTO: Numero di thread per l'estrazione patches
+
+# ============================================================================
+# NUOVA FUNZIONE: SELEZIONE CARTELLA TARGET (DA STEP 1)
+# ============================================================================
+
+# Percorso radice da cui cercare le cartelle dei target
+ROOT_DATA_DIR = Path(r'F:\Super Revolt Gaia\SuperResolution\data')
+
+def select_target_directory():
+    """
+    Mostra un menu per selezionare la cartella del target da cui derivare BASE_DIR.
+    """
+    print("\n" + "📂"*35)
+    print("SELEZIONE CARTELLA TARGET".center(70))
+    print("📂"*35)
+    print(f"\nScansione sottocartelle in: {ROOT_DATA_DIR}")
+
+    try:
+        subdirs = [d for d in ROOT_DATA_DIR.iterdir() if d.is_dir()]
+    except Exception as e:
+        print(f"\n❌ ERRORE: Impossibile leggere la cartella {ROOT_DATA_DIR}")
+        print(f"   Dettagli: {e}")
+        return None
+
+    if not subdirs:
+        print(f"\n❌ ERRORE: Nessuna sottocartella trovata in {ROOT_DATA_DIR}")
+        print("   Assicurati di aver creato cartelle come 'M33', 'M42', ecc.")
+        return None
+
+    print("\nCartelle target disponibili:")
+    for i, dir_path in enumerate(subdirs):
+        print(f"   {i+1}: {dir_path.name}")
+
+    while True:
+        print("\n" + "─"*70)
+        try:
+            choice_str = input(f"👉 Seleziona un numero (1-{len(subdirs)}) o 'q' per uscire: ").strip()
+
+            if choice_str.lower() == 'q':
+                print("👋 Uscita.")
+                return None
+
+            choice = int(choice_str) - 1
+            if 0 <= choice < len(subdirs):
+                selected_dir = subdirs[choice]
+                print(f"\n✅ Cartella selezionata: {selected_dir.name}")
+                print(f"   Percorso completo: {selected_dir}")
+                return selected_dir
+            else:
+                print(f"❌ Scelta non valida. Inserisci un numero tra 1 e {len(subdirs)}.")
+        except ValueError:
+            print("❌ Input non valido. Inserisci un numero.")
+        except Exception as e:
+            print(f"❌ Errore: {e}")
+            return None
 
 
 # ============================================================================
@@ -84,20 +124,19 @@ def main_menu():
     print("🌟"*35)
     
     print(f"\n📋 SCEGLI OPERAZIONE:")
-    print(f"\n1️⃣  SOLO ANALISI")
+    print(f"\n1️⃣  SOLO ANALISI (Step 5)")
     print(f"   • Analizza overlap tra immagini Hubble e Observatory")
     print(f"   • Calcola dimensioni ottimali patches")
     print(f"   • Genera report e visualizzazioni")
     
-    print(f"\n2️⃣  SOLO ESTRAZIONE PATCHES")
-    print(f"   • Estrae patches dalle immagini registrate")
+    print(f"\n2️⃣  SOLO ESTRAZIONE PATCHES (Step 6)")
+    print(f"   • Estrae patches (multi-threaded)")
     print(f"   • Mantiene risoluzione nativa")
     print(f"   • Crea dataset splits (train/val/test)")
     
     print(f"\n3️⃣  ENTRAMBI (Step 5 + Step 6)")
     print(f"   • Esegue prima l'analisi completa")
-    print(f"   • Poi estrae le patches")
-    print(f"   • Pipeline completa end-to-end")
+    print(f"   • Poi estrae le patches (multi-threaded)")
     
     while True:
         print(f"\n" + "─"*70)
@@ -118,6 +157,7 @@ def main_menu():
 
 # ============================================================================
 # STEP 5: ANALISI OVERLAP E DIMENSIONI PATCHES
+# (Nessuna modifica in questa sezione)
 # ============================================================================
 
 class ImageAnalyzer:
@@ -134,7 +174,6 @@ class ImageAnalyzer:
         """Carica e analizza immagine"""
         try:
             with fits.open(self.filepath) as hdul:
-                # Trova HDU con dati
                 data_hdu = None
                 for i, hdu in enumerate(hdul):
                     if hdu.data is not None and len(hdu.data.shape) >= 2:
@@ -147,13 +186,11 @@ class ImageAnalyzer:
                 self.data = data_hdu.data
                 self.header = data_hdu.header
                 
-                # Se 3D, usa primo canale
                 if len(self.data.shape) == 3:
                     self.data = self.data[0]
                 
                 ny, nx = self.data.shape
                 
-                # Info base
                 self.info = {
                     'filename': self.filepath.name,
                     'shape': (ny, nx),
@@ -161,7 +198,6 @@ class ImageAnalyzer:
                     'size_mb': round(self.data.nbytes / (1024**2), 2),
                 }
                 
-                # Statistiche
                 valid_mask = np.isfinite(self.data)
                 valid_data = self.data[valid_mask]
                 
@@ -175,7 +211,6 @@ class ImageAnalyzer:
                         'median': float(np.median(valid_data)),
                     }
                 
-                # WCS
                 try:
                     self.wcs = WCS(self.header)
                     if self.wcs.has_celestial:
@@ -196,14 +231,9 @@ class ImageAnalyzer:
     def _analyze_wcs(self):
         """Analizza WCS e calcola FOV"""
         ny, nx = self.data.shape
-        
-        # Centro
         center = self.wcs.pixel_to_world(nx/2, ny/2)
-        
-        # Pixel scale
         pixel_scale = self._get_pixel_scale()
         
-        # FOV dai corners
         corners = self.wcs.pixel_to_world([0, nx, nx, 0], [0, 0, ny, ny])
         ra_vals = [c.ra.deg for c in corners]
         dec_vals = [c.dec.deg for c in corners]
@@ -248,26 +278,17 @@ class ImageAnalyzer:
         
         pixel_scale_arcsec = self.info['wcs']['pixel_scale_arcsec']
         target_arcsec = target_arcmin * 60
-        
-        # Dimensione in pixel
         patch_size_px = int(target_arcsec / pixel_scale_arcsec)
-        
-        # Arrotonda a multiplo di 8
         patch_size_px = ((patch_size_px + 7) // 8) * 8
         
-        # Dimensione effettiva
         actual_arcsec = patch_size_px * pixel_scale_arcsec
         actual_arcmin = actual_arcsec / 60
         
-        # Numero patches
         ny, nx = self.data.shape
-        
-        # Senza overlap
         n_x = nx // patch_size_px
         n_y = ny // patch_size_px
         total_no_overlap = n_x * n_y
         
-        # Con overlap
         step = int(patch_size_px * (1 - PATCH_OVERLAP_PERCENT_ANALYSIS/100))
         n_x_overlap = max(1, (nx - patch_size_px) // step + 1) if step > 0 else 1
         n_y_overlap = max(1, (ny - patch_size_px) // step + 1) if step > 0 else 1
@@ -278,16 +299,8 @@ class ImageAnalyzer:
             'patch_size_px': patch_size_px,
             'actual_size_arcmin': actual_arcmin,
             'actual_size_arcsec': actual_arcsec,
-            'patches_no_overlap': {
-                'x': n_x,
-                'y': n_y,
-                'total': total_no_overlap
-            },
-            'patches_with_overlap': {
-                'x': n_x_overlap,
-                'y': n_y_overlap,
-                'total': total_with_overlap
-            }
+            'patches_no_overlap': {'x': n_x, 'y': n_y, 'total': total_no_overlap},
+            'patches_with_overlap': {'x': n_x_overlap, 'y': n_y_overlap, 'total': total_with_overlap}
         }
 
 
@@ -304,35 +317,27 @@ class OverlapAnalyzer:
         if self.img1.wcs is None or self.img2.wcs is None:
             return None
         
-        # Bounding boxes
         wcs1 = self.img1.info['wcs']
         wcs2 = self.img2.info['wcs']
         
-        # Overlap RA
         ra1_min, ra1_max = wcs1['ra_range']
         ra2_min, ra2_max = wcs2['ra_range']
-        
         overlap_ra_min = max(ra1_min, ra2_min)
         overlap_ra_max = min(ra1_max, ra2_max)
         
-        # Overlap DEC
         dec1_min, dec1_max = wcs1['dec_range']
         dec2_min, dec2_max = wcs2['dec_range']
-        
         overlap_dec_min = max(dec1_min, dec2_min)
         overlap_dec_max = min(dec1_max, dec2_max)
         
-        # Verifica overlap
         if overlap_ra_max <= overlap_ra_min or overlap_dec_max <= overlap_dec_min:
             return None
         
-        # Area overlap
         overlap_ra_span = overlap_ra_max - overlap_ra_min
         overlap_dec_span = overlap_dec_max - overlap_dec_min
         overlap_area_deg2 = overlap_ra_span * overlap_dec_span
         overlap_area_arcmin2 = overlap_area_deg2 * 3600
         
-        # Frazioni
         area1 = wcs1['fov_ra_deg'] * wcs1['fov_dec_deg']
         area2 = wcs2['fov_ra_deg'] * wcs2['fov_dec_deg']
         
@@ -356,7 +361,6 @@ class OverlapAnalyzer:
         
         fig, ax = plt.subplots(figsize=(10, 8))
         
-        # Immagine 1
         wcs1 = self.img1.info['wcs']
         ra1 = wcs1['ra_range']
         dec1 = wcs1['dec_range']
@@ -365,7 +369,6 @@ class OverlapAnalyzer:
             fill=False, edgecolor='blue', linewidth=2, label=self.img1.filepath.name
         ))
         
-        # Immagine 2
         wcs2 = self.img2.info['wcs']
         ra2 = wcs2['ra_range']
         dec2 = wcs2['dec_range']
@@ -374,7 +377,6 @@ class OverlapAnalyzer:
             fill=False, edgecolor='red', linewidth=2, label=self.img2.filepath.name
         ))
         
-        # Overlap
         ov = self.overlap_info
         ax.add_patch(plt.Rectangle(
             (ov['overlap_ra_range'][0], ov['overlap_dec_range'][0]),
@@ -437,9 +439,7 @@ def analyze_all_pairs(hubble_imgs, obs_imgs):
                     'analyzer': analyzer
                 })
     
-    # Ordina per area overlap
     results.sort(key=lambda x: x['overlap']['overlap_area_arcmin2'], reverse=True)
-    
     return results
 
 
@@ -473,21 +473,11 @@ def create_summary_report(hubble_imgs, obs_imgs, overlap_results, output_dir):
         'timestamp': datetime.now().isoformat(),
         'target': 'all',
         'source_type': 'cropped_images',
-        'hubble': {
-            'count': len(hubble_imgs),
-            'images': []
-        },
-        'observatory': {
-            'count': len(obs_imgs),
-            'images': []
-        },
-        'overlap': {
-            'pairs_with_overlap': len(overlap_results),
-            'best_matches': []
-        }
+        'hubble': {'count': len(hubble_imgs), 'images': []},
+        'observatory': {'count': len(obs_imgs), 'images': []},
+        'overlap': {'pairs_with_overlap': len(overlap_results), 'best_matches': []}
     }
     
-    # Info Hubble
     for img in hubble_imgs:
         info = {'filename': img.filepath.name, 'shape': img.info['shape']}
         if 'wcs' in img.info:
@@ -495,7 +485,6 @@ def create_summary_report(hubble_imgs, obs_imgs, overlap_results, output_dir):
             info['patch_1arcmin'] = img.calculate_patch_size(1.0)
         report['hubble']['images'].append(info)
     
-    # Info Observatory
     for img in obs_imgs:
         info = {'filename': img.filepath.name, 'shape': img.info['shape']}
         if 'wcs' in img.info:
@@ -503,7 +492,6 @@ def create_summary_report(hubble_imgs, obs_imgs, overlap_results, output_dir):
             info['patch_1arcmin'] = img.calculate_patch_size(1.0)
         report['observatory']['images'].append(info)
     
-    # Best matches
     for result in overlap_results[:10]:
         report['overlap']['best_matches'].append({
             'hubble_file': result['hubble'].filepath.name,
@@ -513,7 +501,6 @@ def create_summary_report(hubble_imgs, obs_imgs, overlap_results, output_dir):
             'fraction_observatory': result['overlap']['fraction_img2'],
         })
     
-    # Salva JSON
     output_path = output_dir / 'analisi_overlap_report.json'
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(report, f, indent=2)
@@ -522,8 +509,14 @@ def create_summary_report(hubble_imgs, obs_imgs, overlap_results, output_dir):
     return output_path
 
 
-def run_analysis():
-    """Esegue Step 5: Analisi Overlap"""
+def run_analysis(HUBBLE_DIR_ANALYSIS, OBS_DIR_ANALYSIS, OUTPUT_DIR_ANALYSIS):
+    """
+    Esegue Step 5: Analisi Overlap
+    Args:
+        HUBBLE_DIR_ANALYSIS (Path): Percorso input hubble
+        OBS_DIR_ANALYSIS (Path): Percorso input observatory
+        OUTPUT_DIR_ANALYSIS (Path): Percorso output analisi
+    """
     print("\n" + "🔭"*35)
     print(f"STEP 5: ANALISI OVERLAP E PATCHES".center(70))
     print("🔭"*35)
@@ -533,10 +526,8 @@ def run_analysis():
     print(f"   Observatory: {OBS_DIR_ANALYSIS}")
     print(f"   Output: {OUTPUT_DIR_ANALYSIS}")
     
-    # Crea output dir
     OUTPUT_DIR_ANALYSIS.mkdir(parents=True, exist_ok=True)
     
-    # Carica immagini
     print(f"\n{'='*70}")
     print("CARICAMENTO IMMAGINI")
     print(f"{'='*70}")
@@ -552,7 +543,6 @@ def run_analysis():
         print(f"\n❌ Nessuna immagine Observatory caricata!")
         return False
     
-    # Analisi patches
     print(f"\n{'='*70}")
     print("ANALISI DIMENSIONI PATCHES")
     print(f"{'='*70}")
@@ -569,7 +559,6 @@ def run_analysis():
         if len(obs_imgs) > 1:
             print(f"\n   ℹ️  Mostrata solo la prima immagine observatory")
     
-    # Analizza overlap
     overlap_results = analyze_all_pairs(hubble_imgs, obs_imgs)
     
     print(f"\n{'='*70}")
@@ -586,7 +575,6 @@ def run_analysis():
             print(f"      Hubble coverage: {result['overlap']['fraction_img1']*100:.1f}%")
             print(f"      Observatory coverage: {result['overlap']['fraction_img2']*100:.1f}%")
         
-        # Visualizza best match
         best = overlap_results[0]
         viz_path = OUTPUT_DIR_ANALYSIS / 'overlap_best_match.png'
         best['analyzer'].visualize(viz_path)
@@ -594,10 +582,8 @@ def run_analysis():
     else:
         print(f"\n⚠️  Nessun overlap trovato!")
     
-    # Report finale
     create_summary_report(hubble_imgs, obs_imgs, overlap_results, OUTPUT_DIR_ANALYSIS)
     
-    # Raccomandazioni
     print(f"\n{'='*70}")
     print("💡 RACCOMANDAZIONI PATCHES")
     print(f"{'='*70}")
@@ -616,7 +602,7 @@ def run_analysis():
             print(f"      Patches totali: {o_patch['patches_with_overlap']['total'] * len(obs_imgs)}")
     
     print(f"\n{'='*70}")
-    print(f"✅ ANALISI COMPLETATA")
+    print(f"✅ ANALISI (Step 5) COMPLETATA")
     print(f"{'='*70}")
     print(f"\n📁 Output salvato in: {OUTPUT_DIR_ANALYSIS}")
     
@@ -627,13 +613,15 @@ def run_analysis():
 # STEP 6: ESTRAZIONE PATCHES
 # ============================================================================
 
-def select_input_type():
-    """Menu per scegliere tipo input patches"""
-    global INPUT_HUBBLE, INPUT_OBSERVATORY, OUTPUT_DIR_PATCHES
-    global OUTPUT_HUBBLE_PATCHES, OUTPUT_OBS_PATCHES
-    
+def select_input_type(BASE_DIR, 
+                      INPUT_CROPPED_HUBBLE, INPUT_CROPPED_OBSERVATORY,
+                      INPUT_REGISTERED_HUBBLE, INPUT_REGISTERED_OBSERVATORY):
+    """
+    Menu per scegliere tipo input patches.
+    Restituisce i percorsi scelti invece di impostare globali.
+    """
     print("\n" + "🎯"*35)
-    print("SELEZIONE TIPO IMMAGINI INPUT".center(70))
+    print("SELEZIONE TIPO IMMAGINI INPUT (PER STEP 6)".center(70))
     print("🎯"*35)
     
     print(f"\n📋 OPZIONI DISPONIBILI:")
@@ -645,6 +633,11 @@ def select_input_type():
     print(f"   • Mantiene dimensioni originali")
     print(f"   📁 Input: {INPUT_REGISTERED_HUBBLE.parent}")
     
+    INPUT_HUBBLE = None
+    INPUT_OBSERVATORY = None
+    OUTPUT_DIR_PATCHES = None
+    source_type = ""
+    
     while True:
         print(f"\n" + "─"*70)
         choice = input("👉 Scegli opzione [1/2, default=1]: ").strip()
@@ -652,14 +645,14 @@ def select_input_type():
         if choice == '' or choice == '1':
             INPUT_HUBBLE = INPUT_CROPPED_HUBBLE
             INPUT_OBSERVATORY = INPUT_CROPPED_OBSERVATORY
-            OUTPUT_DIR_PATCHES = Path(BASE_DIR) / '6_patches_from_cropped'
+            OUTPUT_DIR_PATCHES = BASE_DIR / '6_patches_from_cropped'
             source_type = "cropped"
             print(f"\n✅ Selezionato: IMMAGINI CROPPED")
             break
         elif choice == '2':
             INPUT_HUBBLE = INPUT_REGISTERED_HUBBLE
             INPUT_OBSERVATORY = INPUT_REGISTERED_OBSERVATORY
-            OUTPUT_DIR_PATCHES = Path(BASE_DIR) / '6_patches_from_registered'
+            OUTPUT_DIR_PATCHES = BASE_DIR / '6_patches_from_registered'
             source_type = "registered"
             print(f"\n✅ Selezionato: IMMAGINI REGISTERED")
             break
@@ -685,14 +678,15 @@ def select_input_type():
     
     print(f"\n📂 Output patches: {OUTPUT_DIR_PATCHES}")
     
-    return source_type
+    return (source_type, INPUT_HUBBLE, INPUT_OBSERVATORY, 
+            OUTPUT_DIR_PATCHES, OUTPUT_HUBBLE_PATCHES, OUTPUT_OBS_PATCHES)
 
 
 def setup_logging():
-    """Configura logging"""
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    """Configura logging (usa LOG_DIR_ROOT)"""
+    LOG_DIR_ROOT.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_file = LOG_DIR / f'patch_extraction_{timestamp}.log'
+    log_file = LOG_DIR_ROOT / f'patch_extraction_{timestamp}.log'
     
     logging.basicConfig(
         level=logging.INFO,
@@ -764,29 +758,23 @@ def extract_patches_from_image(fits_path, output_dir, source_label, logger):
             while y + patch_size_px <= ny:
                 x = 0
                 while x + patch_size_px <= nx:
-                    # Estrai patch
                     patch_data = data[y:y+patch_size_px, x:x+patch_size_px]
                     
-                    # Verifica validità
                     valid_mask = np.isfinite(patch_data)
                     valid_percent = 100 * valid_mask.sum() / patch_data.size
                     
                     if valid_percent >= MIN_VALID_PERCENT:
-                        # Coordinate centro patch
                         center_x = x + patch_size_px // 2
                         center_y = y + patch_size_px // 2
                         center_coord = wcs.pixel_to_world(center_x, center_y)
                         
-                        # Salva patch
                         filename = f'{source_label}_{Path(fits_path).stem}_p{patch_idx:04d}.fits'
                         output_path = output_dir / filename
                         
-                        # Crea nuovo header
                         patch_header = header.copy()
                         patch_header['NAXIS1'] = patch_size_px
                         patch_header['NAXIS2'] = patch_size_px
                         
-                        # Salva
                         patch_hdu = fits.PrimaryHDU(patch_data, header=patch_header)
                         patch_hdu.writeto(output_path, overwrite=True)
                         
@@ -810,13 +798,17 @@ def extract_patches_from_image(fits_path, output_dir, source_label, logger):
             return patches_info
             
     except Exception as e:
-        logger.error(f"Errore in {fits_path}: {e}")
+        logger.error(f"Errore in {fits_path.name}: {e}")
         return []
 
 
+# ============================================================================
+# MODIFICA: Funzione extract_all_patches aggiornata per multi-threading
+# ============================================================================
+
 def extract_all_patches(input_dir, output_dir, label, logger):
-    """Estrae patches da tutte le immagini"""
-    print(f"\n🔪 Estrazione patches {label.upper()}...")
+    """Estrae patches da tutte le immagini (con multithreading)"""
+    print(f"\n🔪 Estrazione patches {label.upper()} (con {NUM_THREADS} threads)...")
     
     files = list(input_dir.glob('*.fits')) + list(input_dir.glob('*.fit'))
     
@@ -826,9 +818,22 @@ def extract_all_patches(input_dir, output_dir, label, logger):
     
     all_patches = []
     
-    for fpath in tqdm(files, desc=f"   {label}", ncols=70):
-        patches = extract_patches_from_image(fpath, output_dir, label, logger)
-        all_patches.extend(patches)
+    with ThreadPoolExecutor(max_workers=NUM_THREADS) as executor:
+        # Crea un dizionario di 'future' per tenere traccia dei file
+        futures = {executor.submit(extract_patches_from_image, fpath, output_dir, label, logger): fpath for fpath in files}
+        
+        with tqdm(total=len(files), desc=f"   {label}", ncols=70) as pbar:
+            for future in as_completed(futures):
+                fpath = futures[future]
+                try:
+                    # Ottieni il risultato (lista di patch info da un file)
+                    patches_from_file = future.result()
+                    if patches_from_file:
+                        all_patches.extend(patches_from_file)
+                    pbar.update(1)
+                except Exception as e:
+                    logger.error(f"Errore nel thread processando {fpath.name}: {e}")
+                    pbar.update(1) # Assicurati di aggiornare pbar anche in caso di errore
     
     print(f"   ✓ Estratte {len(all_patches)} patches da {len(files)} immagini")
     
@@ -844,30 +849,35 @@ def extract_all_patches(input_dir, output_dir, label, logger):
     
     return all_patches
 
-
 # ============================================================================
 # MODIFICA: Funzione create_patch_pairs aggiornata
 # ============================================================================
 
-def create_patch_pairs(hubble_patches, obs_patches, output_dir, logger):
+def create_patch_pairs(hubble_patches, obs_patches, 
+                       OUTPUT_DIR_PATCHES, 
+                       OUTPUT_HUBBLE_PATCHES, 
+                       OUTPUT_OBS_PATCHES, 
+                       logger):
     """Crea coppie di patches basate su prossimità spaziale
     E SALVA OGNI COPPIA IN UNA CARTELLA DEDICATA.
+    
+    Args:
+        hubble_patches (list): Metadati patches hubble
+        obs_patches (list): Metadati patches observatory
+        OUTPUT_DIR_PATCHES (Path): Cartella output principale (per pairs.json)
+        OUTPUT_HUBBLE_PATCHES (Path): Cartella sorgente patches hubble
+        OUTPUT_OBS_PATCHES (Path): Cartella sorgente patches observatory
+        logger: Logger
     """
     print(f"\n🔗 Creazione coppie patches...")
     
-    # --- INIZIO MODIFICA ---
+    hubble_patch_dir = OUTPUT_HUBBLE_PATCHES
+    obs_patch_dir = OUTPUT_OBS_PATCHES
     
-    # Definisci le directory sorgente da cui copiare le patch
-    hubble_patch_dir = output_dir / 'hubble_native'
-    obs_patch_dir = output_dir / 'observatory_native'
-    
-    # Definisci la directory di output principale per le cartelle delle coppie
-    pairs_folders_dir = output_dir / 'paired_patches_folders'
+    pairs_folders_dir = OUTPUT_DIR_PATCHES / 'paired_patches_folders'
     pairs_folders_dir.mkdir(parents=True, exist_ok=True)
     
     print(f"   📂 Creazione cartelle coppie in: {pairs_folders_dir}")
-    
-    # --- FINE MODIFICA ---
     
     threshold_arcmin = 0.5
     pairs = []
@@ -888,23 +898,17 @@ def create_patch_pairs(hubble_patches, obs_patches, output_dir, logger):
         
         if best_dist < threshold_arcmin and best_obs:
             
-            # --- INIZIO MODIFICA ---
-            
-            # Definisci la cartella specifica per questa coppia
             pair_index = len(pairs)
-            pair_folder_name = f'pair_{pair_index:05d}' # (es. pair_00001)
+            pair_folder_name = f'pair_{pair_index:05d}'
             pair_dest_dir = pairs_folders_dir / pair_folder_name
             pair_dest_dir.mkdir(exist_ok=True)
             
-            # Nomi file
             h_filename = h_patch['filename']
             o_filename = best_obs['filename']
             
-            # Percorsi sorgente
             h_src_path = hubble_patch_dir / h_filename
             o_src_path = obs_patch_dir / o_filename
             
-            # Copia i file FITS nella loro nuova cartella
             try:
                 shutil.copy2(h_src_path, pair_dest_dir / h_filename)
                 shutil.copy2(o_src_path, pair_dest_dir / o_filename)
@@ -913,16 +917,13 @@ def create_patch_pairs(hubble_patches, obs_patches, output_dir, logger):
             except Exception as e:
                 logger.error(f"Errore copiando {pair_folder_name}: {e}")
                 
-            # --- FINE MODIFICA ---
-                
             pairs.append({
                 'hubble_patch': h_patch['filename'],
                 'observatory_patch': best_obs['filename'],
                 'separation_arcmin': best_dist
             })
     
-    # Salva pairs (questa parte resta invariata)
-    pairs_file = output_dir / 'patch_pairs.json'
+    pairs_file = OUTPUT_DIR_PATCHES / 'patch_pairs.json'
     with open(pairs_file, 'w') as f:
         json.dump({
             'timestamp': datetime.now().isoformat(),
@@ -954,7 +955,6 @@ def create_dataset_split(patches, output_dir, logger):
         'test': patches[n_train+n_val:]
     }
     
-    # Salva split
     split_file = output_dir / 'dataset_split.json'
     with open(split_file, 'w') as f:
         json.dump({
@@ -968,9 +968,23 @@ def create_dataset_split(patches, output_dir, logger):
     return splits
 
 
-def run_patches():
-    """Esegue Step 6: Estrazione Patches"""
-    source_type = select_input_type()
+def run_patches(BASE_DIR, 
+                INPUT_CROPPED_HUBBLE, INPUT_CROPPED_OBSERVATORY,
+                INPUT_REGISTERED_HUBBLE, INPUT_REGISTERED_OBSERVATORY):
+    """
+    Esegue Step 6: Estrazione Patches
+    Args:
+        BASE_DIR (Path): Cartella base del target
+        ... (Path): Percorsi per i vari input
+    """
+    (source_type, INPUT_HUBBLE, INPUT_OBSERVATORY, 
+     OUTPUT_DIR_PATCHES, OUTPUT_HUBBLE_PATCHES, 
+     OUTPUT_OBS_PATCHES) = select_input_type(
+         BASE_DIR, 
+         INPUT_CROPPED_HUBBLE, INPUT_CROPPED_OBSERVATORY,
+         INPUT_REGISTERED_HUBBLE, INPUT_REGISTERED_OBSERVATORY
+     )
+    
     logger = setup_logging()
     
     print("\n" + "✂️ "*35)
@@ -989,11 +1003,9 @@ def run_patches():
     print(f"\n📂 OUTPUT:")
     print(f"   {OUTPUT_DIR_PATCHES}")
     
-    # Crea directories
     OUTPUT_HUBBLE_PATCHES.mkdir(parents=True, exist_ok=True)
     OUTPUT_OBS_PATCHES.mkdir(parents=True, exist_ok=True)
     
-    # Estrazione
     print(f"\n{'='*70}")
     print("ESTRAZIONE PATCHES")
     print(f"{'='*70}")
@@ -1007,7 +1019,6 @@ def run_patches():
     if INPUT_OBSERVATORY.exists():
         obs_patches = extract_all_patches(INPUT_OBSERVATORY, OUTPUT_OBS_PATCHES, 'observatory', logger)
     
-    # Riepilogo
     print(f"\n{'='*70}")
     print("📊 RIEPILOGO ESTRAZIONE")
     print(f"{'='*70}")
@@ -1015,12 +1026,16 @@ def run_patches():
     print(f"   Observatory patches: {len(obs_patches)}")
     print(f"   TOTALE: {len(hubble_patches) + len(obs_patches)}")
     
-    # Crea coppie
     pairs = []
     if hubble_patches and obs_patches:
-        pairs = create_patch_pairs(hubble_patches, obs_patches, OUTPUT_DIR_PATCHES, logger)
+        pairs = create_patch_pairs(
+            hubble_patches, obs_patches, 
+            OUTPUT_DIR_PATCHES, 
+            OUTPUT_HUBBLE_PATCHES, 
+            OUTPUT_OBS_PATCHES, 
+            logger
+        )
     
-    # Split dataset
     print(f"\n{'='*70}")
     print("SPLIT DATASET")
     print(f"{'='*70}")
@@ -1041,7 +1056,6 @@ def run_patches():
             print(f"   Val: {len(obs_splits['val'])}")
             print(f"   Test: {len(obs_splits['test'])}")
     
-    # Metadata
     metadata = {
         'timestamp': datetime.now().isoformat(),
         'source_type': source_type,
@@ -1057,7 +1071,7 @@ def run_patches():
         json.dump(metadata, f, indent=2)
     
     print(f"\n{'='*70}")
-    print(f"✅ ESTRAZIONE COMPLETATA")
+    print(f"✅ ESTRAZIONE (Step 6) COMPLETATA")
     print(f"{'='*70}")
     print(f"\n📁 Output: {OUTPUT_DIR_PATCHES}")
     
@@ -1070,44 +1084,90 @@ def run_patches():
 
 def main():
     """Main unificato"""
+    
+    BASE_DIR = None
+    
+    if len(sys.argv) > 1:
+        BASE_DIR = Path(sys.argv[1])
+        print(f"🚀 Avviato da script precedente. Target: {BASE_DIR.name}")
+    else:
+        BASE_DIR = select_target_directory()
+    
+    if BASE_DIR is None:
+        print("Nessun target selezionato. Uscita.")
+        return
+
+    print(f"TARGET: {BASE_DIR.name}".center(70))
+    print("="*70)
+
     start_time = time.time()
     
-    # Menu principale
+    HUBBLE_DIR_ANALYSIS = BASE_DIR / '4_cropped' / 'hubble'
+    OBS_DIR_ANALYSIS = BASE_DIR / '4_cropped' / 'observatory'
+    OUTPUT_DIR_ANALYSIS = BASE_DIR / '5_analisi_overlap'
+
+    INPUT_CROPPED_HUBBLE = BASE_DIR / '4_cropped' / 'hubble'
+    INPUT_CROPPED_OBSERVATORY = BASE_DIR / '4_cropped' / 'observatory'
+    INPUT_REGISTERED_HUBBLE = BASE_DIR / '3_registered_native' / 'hubble'
+    INPUT_REGISTERED_OBSERVATORY = BASE_DIR / '3_registered_native' / 'observatory'
+    
     mode = main_menu()
     
     success = True
+    OUTPUT_DIR_PATCHES_FINAL = None
     
     if mode == 'analysis':
-        # Solo analisi
-        success = run_analysis()
+        success = run_analysis(
+            HUBBLE_DIR_ANALYSIS, 
+            OBS_DIR_ANALYSIS, 
+            OUTPUT_DIR_ANALYSIS
+        )
         
     elif mode == 'patches':
-        # Solo patches
-        success = run_patches()
+        success = run_patches(
+            BASE_DIR, 
+            INPUT_CROPPED_HUBBLE, INPUT_CROPPED_OBSERVATORY,
+            INPUT_REGISTERED_HUBBLE, INPUT_REGISTERED_OBSERVATORY
+        )
+        if (BASE_DIR / '6_patches_from_cropped').exists():
+            OUTPUT_DIR_PATCHES_FINAL = BASE_DIR / '6_patches_from_cropped'
+        else:
+            OUTPUT_DIR_PATCHES_FINAL = BASE_DIR / '6_patches_from_registered'
+
         
     elif mode == 'both':
-        # Prima analisi
         print("\n" + "="*70)
-        print("FASE 1: ANALISI OVERLAP")
+        print("FASE 1: ANALISI OVERLAP (Step 5)")
         print("="*70)
-        success_analysis = run_analysis()
+        success_analysis = run_analysis(
+            HUBBLE_DIR_ANALYSIS, 
+            OBS_DIR_ANALYSIS, 
+            OUTPUT_DIR_ANALYSIS
+        )
         
         if success_analysis:
-            # Poi patches
             print("\n" + "="*70)
-            print("FASE 2: ESTRAZIONE PATCHES")
+            print("FASE 2: ESTRAZIONE PATCHES (Step 6)")
             print("="*70)
-            success_patches = run_patches()
+            success_patches = run_patches(
+                BASE_DIR, 
+                INPUT_CROPPED_HUBBLE, INPUT_CROPPED_OBSERVATORY,
+                INPUT_REGISTERED_HUBBLE, INPUT_REGISTERED_OBSERVATORY
+            )
             success = success_analysis and success_patches
+            
+            if (BASE_DIR / '6_patches_from_cropped').exists():
+                OUTPUT_DIR_PATCHES_FINAL = BASE_DIR / '6_patches_from_cropped'
+            else:
+                OUTPUT_DIR_PATCHES_FINAL = BASE_DIR / '6_patches_from_registered'
         else:
             print(f"\n⚠️  Analisi fallita, skip estrazione patches")
             success = False
     
-    # Summary finale
     elapsed = time.time() - start_time
     
     print(f"\n" + "="*70)
-    print("COMPLETAMENTO PIPELINE")
+    print("COMPLETAMENTO PIPELINE (Step 5-6)")
     print("="*70)
     
     if success:
@@ -1120,11 +1180,10 @@ def main():
     print(f"\n📁 OUTPUT DIRECTORIES:")
     if mode in ['analysis', 'both']:
         print(f"   Analisi: {OUTPUT_DIR_ANALYSIS}")
-    if mode in ['patches', 'both']:
-        print(f"   Patches: {OUTPUT_DIR_PATCHES}")
-        # Mostra anche la nuova cartella delle coppie
-        if OUTPUT_DIR_PATCHES:
-             print(f"   Coppie:  {OUTPUT_DIR_PATCHES / 'paired_patches_folders'}")
+    if mode in ['patches', 'both'] and OUTPUT_DIR_PATCHES_FINAL:
+        print(f"   Patches: {OUTPUT_DIR_PATCHES_FINAL}")
+        if (OUTPUT_DIR_PATCHES_FINAL / 'paired_patches_folders').exists():
+             print(f"   Coppie:  {OUTPUT_DIR_PATCHES_FINAL / 'paired_patches_folders'}")
     
     print(f"\n{'='*70}")
     print("GRAZIE PER AVER USATO LO SCRIPT UNIFICATO!")
