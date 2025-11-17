@@ -2,11 +2,13 @@
 STEP 3+4: RITAGLIO IMMAGINI REGISTRATE E CREAZIONE MOSAICO
 1. Ritaglia tutte le immagini registrate alle dimensioni dell'immagine più piccola
 2. Crea un mosaico (media) da tutte le immagini ritagliate
+CON MENU DI PROSEGUIMENTO TRA RITAGLIO E MOSAICO
 
-INPUT: Cartelle '3_registered_native/hubble' e '3_registered_native/observatory'
-OUTPUT: 
-  - Cartelle '4_cropped/hubble' e '4_cropped/observatory' con immagini ritagliate
-  - File '5_mosaics/final_mosaic.fits' con il mosaico finale
+MODIFICATO:
+- Aggiunto menu per avviare step3_analizzapatch.py (passando BASE_DIR)
+- Aggiunto menu iniziale per selezionare la cartella del target (se avviato da solo).
+- Accetta BASE_DIR come argomento da riga di comando (se avviato da step1).
+- Tutti i percorsi sono ora relativi alla cartella del target selezionata (BASE_DIR).
 """
 
 import os
@@ -17,31 +19,66 @@ import numpy as np
 from astropy.io import fits
 from tqdm import tqdm
 import warnings
+import sys
+import subprocess # Aggiunto per coerenza
 
 warnings.filterwarnings('ignore')
 
 # ============================================================================
-# CONFIGURAZIONE
+# NUOVA FUNZIONE: SELEZIONE CARTELLA TARGET (DA STEP 1)
 # ============================================================================
 
-BASE_DIR = r'F:\Super Revolt Gaia\parte 2(patch)\data'
+# Percorso radice da cui cercare le cartelle dei target
+# Deve essere lo stesso di step1_wcsregister.py
+ROOT_DATA_DIR = Path(r'F:\Super Revolt Gaia\SuperResolution\data')
 
-# Input: cartelle con immagini registrate da step3
-INPUT_DIRS = {
-    'hubble': Path(BASE_DIR) / '3_registered_native' / 'hubble',
-    'observatory': Path(BASE_DIR) / '3_registered_native' / 'observatory'
-}
+def select_target_directory():
+    """
+    Mostra un menu per selezionare la cartella del target da cui derivare BASE_DIR.
+    """
+    print("\n" + "📂"*35)
+    print("SELEZIONE CARTELLA TARGET".center(70))
+    print("📂"*35)
+    print(f"\nScansione sottocartelle in: {ROOT_DATA_DIR}")
 
-# Output: cartelle per le immagini ritagliate
-OUTPUT_DIR_BASE = Path(BASE_DIR) / '4_cropped'
-OUTPUT_DIRS = {
-    'hubble': OUTPUT_DIR_BASE / 'hubble',
-    'observatory': OUTPUT_DIR_BASE / 'observatory'
-}
+    try:
+        subdirs = [d for d in ROOT_DATA_DIR.iterdir() if d.is_dir()]
+    except Exception as e:
+        print(f"\n❌ ERRORE: Impossibile leggere la cartella {ROOT_DATA_DIR}")
+        print(f"   Dettagli: {e}")
+        return None
 
-# Output: cartella e file per il mosaico finale
-MOSAIC_OUTPUT_DIR = Path(BASE_DIR) / '5_mosaics'
-MOSAIC_OUTPUT_FILE = MOSAIC_OUTPUT_DIR / 'final_mosaic.fits'
+    if not subdirs:
+        print(f"\n❌ ERRORE: Nessuna sottocartella trovata in {ROOT_DATA_DIR}")
+        print("   Assicurati di aver creato cartelle come 'M33', 'M42', ecc.")
+        return None
+
+    print("\nCartelle target disponibili:")
+    for i, dir_path in enumerate(subdirs):
+        print(f"   {i+1}: {dir_path.name}")
+
+    while True:
+        print("\n" + "─"*70)
+        try:
+            choice_str = input(f"👉 Seleziona un numero (1-{len(subdirs)}) o 'q' per uscire: ").strip()
+
+            if choice_str.lower() == 'q':
+                print("👋 Uscita.")
+                return None
+
+            choice = int(choice_str) - 1
+            if 0 <= choice < len(subdirs):
+                selected_dir = subdirs[choice]
+                print(f"\n✅ Cartella selezionata: {selected_dir.name}")
+                print(f"   Percorso completo: {selected_dir}")
+                return selected_dir  # Ritorna l'oggetto Path
+            else:
+                print(f"❌ Scelta non valida. Inserisci un numero tra 1 e {len(subdirs)}.")
+        except ValueError:
+            print("❌ Input non valido. Inserisci un numero.")
+        except Exception as e:
+            print(f"❌ Errore: {e}")
+            return None
 
 # ============================================================================
 # FUNZIONI - RITAGLIO
@@ -66,7 +103,24 @@ def find_smallest_dimensions(all_files):
     for filepath in tqdm(all_files, desc="Scansione", unit="file"):
         try:
             with fits.open(filepath) as hdul:
-                height, width = hdul[0].data.shape
+                # Cerca l'HDU con i dati
+                data_hdu = None
+                for hdu in hdul:
+                    if hdu.data is not None and len(hdu.data.shape) >= 2:
+                        data_hdu = hdu
+                        break
+                
+                if data_hdu is None:
+                    print(f"\n⚠️  ATTENZIONE: Nessun dato immagine trovato in {filepath}. Saltato.")
+                    continue
+
+                # Gestisce dati 3D (es. cubi) prendendo il primo slice 2D
+                if len(data_hdu.data.shape) == 3:
+                    shape = data_hdu.data.shape[1:3] # Assumendo (Z, Y, X)
+                else:
+                    shape = data_hdu.data.shape # (Y, X)
+
+                height, width = shape
                 
                 if height < min_height or width < min_width:
                     if height < min_height:
@@ -79,6 +133,10 @@ def find_smallest_dimensions(all_files):
             print(f"\n⚠️  ATTENZIONE: Impossibile leggere {filepath}: {e}")
             continue
     
+    if smallest_file is None:
+        print("\n❌ ERRORE: Impossibile determinare le dimensioni minime. Nessun file valido.")
+        return None, None
+
     print(f"\n✅ Dimensioni minime trovate: {min_width} x {min_height} pixel")
     print(f"   File più piccolo: {Path(smallest_file).name}")
     
@@ -97,8 +155,24 @@ def crop_image(input_path, output_path, target_height, target_width):
     """
     try:
         with fits.open(input_path) as hdul:
-            data = hdul[0].data
-            header = hdul[0].header
+            # Trova l'HDU con i dati
+            data_hdu = None
+            for hdu in hdul:
+                if hdu.data is not None and len(hdu.data.shape) >= 2:
+                    data_hdu = hdu
+                    break
+            
+            if data_hdu is None:
+                print(f"\n❌ ERRORE: Nessun dato immagine in {input_path.name}")
+                return False
+
+            data = data_hdu.data
+            header = data_hdu.header
+            
+            # Gestisce dati 3D (es. cubi) prendendo il primo slice 2D
+            if len(data.shape) == 3:
+                data = data[0] # Prende il primo piano
+                print(f"\n⚠️  ATTENZIONE: {input_path.name} è 3D, ritagliato primo piano.")
             
             current_height, current_width = data.shape
             
@@ -121,9 +195,12 @@ def crop_image(input_path, output_path, target_height, target_width):
             # Aggiorna le dimensioni nell'header
             header['NAXIS1'] = target_width
             header['NAXIS2'] = target_height
+            if 'NAXIS3' in header: # Rimuovi asse 3 se esisteva
+                del header['NAXIS3']
+            header['NAXIS'] = 2
             
             # Aggiungi informazioni sul ritaglio
-            header['HISTORY'] = 'Cropped by step3_crop_and_mosaic.py'
+            header['HISTORY'] = 'Cropped by step2_croppedmosaico.py'
             header['CROPX'] = (x_offset, 'X offset for cropping')
             header['CROPY'] = (y_offset, 'Y offset for cropping')
             header['ORIGW'] = (current_width, 'Original width')
@@ -141,10 +218,15 @@ def crop_image(input_path, output_path, target_height, target_width):
         return False
 
 
-def crop_all_images():
-    """Esegue il ritaglio di tutte le immagini."""
+def crop_all_images(INPUT_DIRS, OUTPUT_DIRS):
+    """
+    Esegue il ritaglio di tutte le immagini.
+    Args:
+        INPUT_DIRS (dict): Dizionario con i percorsi di input
+        OUTPUT_DIRS (dict): Dizionario con i percorsi di output
+    """
     print("\n" + "✂️ "*35)
-    print("RITAGLIO IMMAGINI REGISTRATE".center(70))
+    print("STEP 3: RITAGLIO IMMAGINI REGISTRATE".center(70))
     print("✂️ "*35)
     
     # Crea cartelle di output
@@ -164,6 +246,11 @@ def crop_all_images():
     file_mapping = {}  # Mappa file -> categoria (hubble/observatory)
     
     for category, input_dir in INPUT_DIRS.items():
+        if not input_dir.exists():
+            print(f"\n⚠️  ATTENZIONE: Directory di input non trovata: {input_dir}")
+            print(f"   La categoria '{category}' verrà saltata.")
+            continue
+            
         files = glob.glob(str(input_dir / '*.fits'))
         files.extend(glob.glob(str(input_dir / '*.fit')))
         
@@ -175,7 +262,7 @@ def crop_all_images():
     
     if not all_files:
         print(f"\n❌ ERRORE: Nessun file FITS trovato nelle cartelle di input.")
-        print("   Assicurati di aver eseguito 'step3_register.py' prima.")
+        print("   Assicurati di aver eseguito 'step1_wcsregister.py' prima.")
         return False
     
     print(f"\n✅ Totale: {len(all_files)} file da ritagliare")
@@ -183,8 +270,12 @@ def crop_all_images():
     # 2. Trova le dimensioni minime
     min_height, min_width = find_smallest_dimensions(all_files)
     
-    # Conferma dimensioni (dovrebbero essere circa 1800px come menzionato)
-    print(f"\n📐 Le immagini verranno ritagliate a: {min_width} x {min_height} pixel")
+    if min_height is None or min_width is None:
+        print(f"\n❌ ERRORE: Impossibile procedere senza dimensioni valide.")
+        return False
+
+    # Conferma dimensioni
+    print(f"\n🔍 Le immagini verranno ritagliate a: {min_width} x {min_height} pixel")
     
     # 3. Ritaglia tutte le immagini
     print("\n✂️  Ritaglio in corso...\n")
@@ -223,30 +314,39 @@ def crop_all_images():
 # FUNZIONI - MOSAICO
 # ============================================================================
 
-def create_mosaic():
-    """Crea il mosaico."""
+def create_mosaic(INPUT_DIRS_CROPPED, MOSAIC_OUTPUT_FILE, MOSAIC_OUTPUT_DIR):
+    """
+    Crea il mosaico.
+    Args:
+        INPUT_DIRS_CROPPED (dict): Cartelle input (output del ritaglio)
+        MOSAIC_OUTPUT_FILE (Path): File FITS di output
+        MOSAIC_OUTPUT_DIR (Path): Cartella di output
+    """
     print("\n" + "🖼️ "*35)
-    print("CREAZIONE MOSAICO DA IMMAGINI REGISTRATE".center(70))
+    print("STEP 4: CREAZIONE MOSAICO DA IMMAGINI RITAGLIATE".center(70))
     print("🖼️ "*35)
     
     # Crea cartella output
     MOSAIC_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     
     # Cartelle con immagini ritagliate
-    REGISTERED_DIRS = [
-        OUTPUT_DIRS['hubble'],
-        OUTPUT_DIRS['observatory']
+    INPUT_DIRS = [
+        INPUT_DIRS_CROPPED['hubble'],
+        INPUT_DIRS_CROPPED['observatory']
     ]
     
     print(f"\n📂 Cartelle di input:")
-    for d in REGISTERED_DIRS:
+    for d in INPUT_DIRS:
         print(f"   - {d}")
     print(f"\n📂 File di output:")
     print(f"   - {MOSAIC_OUTPUT_FILE}")
     
     # 1. Trova tutti i file FITS ritagliati
     all_files = []
-    for d in REGISTERED_DIRS:
+    for d in INPUT_DIRS:
+        if not d.exists():
+            print(f"\n⚠️  ATTENZIONE: Directory input mosaico non trovata: {d}")
+            continue
         all_files.extend(glob.glob(str(d / '*.fits')))
         all_files.extend(glob.glob(str(d / '*.fit')))
         
@@ -318,7 +418,7 @@ def create_mosaic():
     print(f"\n💾 Salvataggio mosaico in {MOSAIC_OUTPUT_FILE}...")
     
     # Aggiorna l'header
-    template_header['HISTORY'] = 'Mosaico creato da step3_crop_and_mosaic.py'
+    template_header['HISTORY'] = 'Mosaico creato da step2_croppedmosaico.py'
     template_header['NCOMBINE'] = (len(all_files), 'Numero di file combinati')
     
     try:
@@ -336,35 +436,177 @@ def create_mosaic():
 
 
 # ============================================================================
-# MAIN
+# MENU DI PROSEGUIMENTO
+# ============================================================================
+
+def ask_continue_to_mosaic():
+    """Chiede all'utente se vuole proseguire con la creazione del mosaico."""
+    print("\n" + "="*70)
+    print("🎯 RITAGLIO COMPLETATO!")
+    print("="*70)
+    
+    print("\n📋 OPZIONI:")
+    print("   1️⃣  Continua con creazione Mosaico")
+    print("   2️⃣  Salta Mosaico (passa a Step 5+6)")
+    
+    while True:
+        print("\n" + "─"*70)
+        choice = input("👉 Vuoi creare il Mosaico ora? [S/n, default=S]: ").strip().lower()
+        
+        if choice == '' or choice == 's' or choice == 'si' or choice == 'y' or choice == 'yes':
+            print("\n✅ Proseguimento con creazione Mosaico...")
+            return True
+        elif choice == 'n' or choice == 'no':
+            print("\n✅ Mosaico saltato.")
+            return False
+        else:
+            print("❌ Scelta non valida. Inserisci S per Sì o N per No.")
+
+
+def ask_continue_to_step3(BASE_DIR):
+    """
+    Chiede all'utente se vuole proseguire con Step 3 (Analisi Patches).
+    Args:
+        BASE_DIR (Path): Il percorso base del target da passare allo script successivo.
+    """
+    print("\n" + "="*70)
+    print("🎯 FASI PRECEDENTI COMPLETATE")
+    print("="*70)
+    
+    print("\n📋 OPZIONI PROSSIMO STEP:")
+    print("   1️⃣  Continua con Step 5+6 (Analisi e Patches)")
+    print("   2️⃣  Termina qui")
+    
+    while True:
+        print("\n" + "─"*70)
+        choice = input("👉 Vuoi continuare con 'step3_analizzapatch.py'? [S/n, default=S]: ").strip().lower()
+        
+        if choice == '' or choice == 's' or choice == 'si' or choice == 'y' or choice == 'yes':
+            print("\n✅ Avvio Step 5+6 (step3_analizzapatch.py)...")
+            return True
+        elif choice == 'n' or choice == 'no':
+            print("\n✅ Pipeline completata")
+            print("   Per eseguire Step 5+6 in seguito, esegui 'step3_analizzapatch.py'")
+            return False
+        else:
+            print("❌ Scelta non valida. Inserisci S per Sì o N per No.")
+
+
+# ============================================================================
+# MAIN (MODIFICATA)
 # ============================================================================
 
 def main():
     """Funzione principale che esegue ritaglio e creazione mosaico."""
+    
+    BASE_DIR = None
+    
+    # --- NUOVO: GESTIONE BASE_DIR ---
+    if len(sys.argv) > 1:
+        # Se avviato da step1, prende BASE_DIR dall'argomento
+        BASE_DIR = Path(sys.argv[1])
+        print(f"🚀 Avviato da script precedente. Target: {BASE_DIR.name}")
+    else:
+        # Se avviato da solo, mostra il menu
+        BASE_DIR = select_target_directory()
+    
+    if BASE_DIR is None:
+        print("Nessun target selezionato. Uscita.")
+        return
+    # --- FINE NUOVO ---
+
     print("\n" + "="*70)
     print("PIPELINE: RITAGLIO IMMAGINI + CREAZIONE MOSAICO".center(70))
+    print(f"TARGET: {BASE_DIR.name}".center(70))
     print("="*70)
+    
+    # --- NUOVO: Definizione percorsi ---
+    # Input: cartelle con immagini registrate da step1
+    INPUT_DIRS = {
+        'hubble': BASE_DIR / '3_registered_native' / 'hubble',
+        'observatory': BASE_DIR / '3_registered_native' / 'observatory'
+    }
+    
+    # Output: cartelle per le immagini ritagliate
+    OUTPUT_DIR_BASE = BASE_DIR / '4_cropped'
+    OUTPUT_DIRS = {
+        'hubble': OUTPUT_DIR_BASE / 'hubble',
+        'observatory': OUTPUT_DIR_BASE / 'observatory'
+    }
+    
+    # Output: cartella e file per il mosaico finale
+    MOSAIC_OUTPUT_DIR = BASE_DIR / '5_mosaics'
+    MOSAIC_OUTPUT_FILE = MOSAIC_OUTPUT_DIR / 'final_mosaic.fits'
+    # --- FINE NUOVO ---
     
     start_time = time.time()
     
     # STEP 1: Ritaglio delle immagini
-    if not crop_all_images():
-        print("\n❌ Pipeline interrotta: errore durante il ritaglio.")
+    # Passa i percorsi come argomenti
+    crop_success = crop_all_images(INPUT_DIRS, OUTPUT_DIRS)
+    
+    if not crop_success:
+        print("\n❌ Pipeline interrotta: errore during il ritaglio.")
         return
     
-    print("\n\n")
+    crop_time = time.time() - start_time
+    print(f"\n⏱️  Tempo ritaglio: {crop_time:.1f} secondi")
     
-    # STEP 2: Creazione del mosaico
-    if not create_mosaic():
-        print("\n❌ Pipeline interrotta: errore durante la creazione del mosaico.")
-        return
+    # Variabili per il riepilogo
+    mosaic_success = False
+    mosaic_time = 0.0
+
+    # MENU: Chiedi se continuare con il mosaico
+    if ask_continue_to_mosaic():
+        print("\n\n")
+        # STEP 2: Creazione del mosaico
+        mosaic_start = time.time()
+        # Passa i percorsi come argomenti
+        mosaic_success = create_mosaic(OUTPUT_DIRS, MOSAIC_OUTPUT_FILE, MOSAIC_OUTPUT_DIR)
+        mosaic_time = time.time() - mosaic_start
+        
+        if mosaic_success:
+            print(f"\n⏱️  Tempo mosaico: {mosaic_time:.1f} secondi")
+        else:
+            print("\n❌ Errore during la creazione del mosaico.")
+            # Non usciamo, continuiamo a chiedere per Step 3
     
     # Riepilogo finale
     elapsed = time.time() - start_time
     print("\n" + "="*70)
-    print("✅ PIPELINE COMPLETATA CON SUCCESSO!")
+    if crop_success:
+        print("✅ FASE DI RITAGLIO (Step 3) COMPLETATA!")
+    if mosaic_success:
+        print("✅ FASE MOSAICO (Step 4) COMPLETATA!")
+    else:
+        print("⚠️  FASE MOSAICO (Step 4) SALTATA O FALLITA.")
     print("="*70)
+    print(f"   ⏱️  Tempo ritaglio: {crop_time:.1f} secondi")
+    if mosaic_success:
+        print(f"   ⏱️  Tempo mosaico: {mosaic_time:.1f} secondi")
     print(f"   ⏱️  Tempo totale: {elapsed:.1f} secondi ({elapsed/60:.1f} minuti)")
+    
+    # MENU: Chiedi se avviare Step 3 (viene chiesto in ogni caso)
+    # Passa BASE_DIR alla funzione
+    if ask_continue_to_step3(BASE_DIR):
+        # Prova ad avviare step3_analizzapatch.py
+        try:
+            script_dir = Path(__file__).parent
+            step3_script = script_dir / 'step3_analizzapatch.py'
+            
+            if step3_script.exists():
+                print(f"\n🚀 Avvio {step3_script.name}...")
+                # Usa sys.executable per assicurare lo stesso interprete python
+                # --- MODIFICA: Passa BASE_DIR come argomento ---
+                subprocess.run([sys.executable, str(step3_script), str(BASE_DIR)])
+            else:
+                print(f"\n⚠️  Script {step3_script.name} non trovato nella directory {script_dir}")
+                print(f"   Eseguilo manualmente quando pronto")
+        except Exception as e:
+            print(f"\n⚠️  Impossibile avviare automaticamente {step3_script.name}: {e}")
+            print(f"   Eseguilo manualmente: python {step3_script.name}")
+    else:
+        print("\n👋 Arrivederci!")
 
 
 if __name__ == "__main__":

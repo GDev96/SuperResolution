@@ -24,6 +24,7 @@ import astropy.units as u
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import warnings
+import shutil  # <-- MODIFICA: Aggiunto import
 
 warnings.filterwarnings('ignore')
 
@@ -64,7 +65,7 @@ TARGET_PATCH_ARCMIN_ANALYSIS = 1.0
 PATCH_OVERLAP_PERCENT_ANALYSIS = 10
 
 # Parametri Step 6
-TARGET_FOV_ARCMIN = 0.85
+TARGET_FOV_ARCMIN = 1
 OVERLAP_PERCENT = 25
 MIN_VALID_PERCENT = 50
 TRAIN_RATIO = 0.7
@@ -844,9 +845,29 @@ def extract_all_patches(input_dir, output_dir, label, logger):
     return all_patches
 
 
+# ============================================================================
+# MODIFICA: Funzione create_patch_pairs aggiornata
+# ============================================================================
+
 def create_patch_pairs(hubble_patches, obs_patches, output_dir, logger):
-    """Crea coppie di patches basate su prossimità spaziale"""
+    """Crea coppie di patches basate su prossimità spaziale
+    E SALVA OGNI COPPIA IN UNA CARTELLA DEDICATA.
+    """
     print(f"\n🔗 Creazione coppie patches...")
+    
+    # --- INIZIO MODIFICA ---
+    
+    # Definisci le directory sorgente da cui copiare le patch
+    hubble_patch_dir = output_dir / 'hubble_native'
+    obs_patch_dir = output_dir / 'observatory_native'
+    
+    # Definisci la directory di output principale per le cartelle delle coppie
+    pairs_folders_dir = output_dir / 'paired_patches_folders'
+    pairs_folders_dir.mkdir(parents=True, exist_ok=True)
+    
+    print(f"   📂 Creazione cartelle coppie in: {pairs_folders_dir}")
+    
+    # --- FINE MODIFICA ---
     
     threshold_arcmin = 0.5
     pairs = []
@@ -866,13 +887,41 @@ def create_patch_pairs(hubble_patches, obs_patches, output_dir, logger):
                 best_obs = o_patch
         
         if best_dist < threshold_arcmin and best_obs:
+            
+            # --- INIZIO MODIFICA ---
+            
+            # Definisci la cartella specifica per questa coppia
+            pair_index = len(pairs)
+            pair_folder_name = f'pair_{pair_index:05d}' # (es. pair_00001)
+            pair_dest_dir = pairs_folders_dir / pair_folder_name
+            pair_dest_dir.mkdir(exist_ok=True)
+            
+            # Nomi file
+            h_filename = h_patch['filename']
+            o_filename = best_obs['filename']
+            
+            # Percorsi sorgente
+            h_src_path = hubble_patch_dir / h_filename
+            o_src_path = obs_patch_dir / o_filename
+            
+            # Copia i file FITS nella loro nuova cartella
+            try:
+                shutil.copy2(h_src_path, pair_dest_dir / h_filename)
+                shutil.copy2(o_src_path, pair_dest_dir / o_filename)
+            except FileNotFoundError as e:
+                logger.warning(f"File non trovato durante copia coppia: {e}")
+            except Exception as e:
+                logger.error(f"Errore copiando {pair_folder_name}: {e}")
+                
+            # --- FINE MODIFICA ---
+                
             pairs.append({
                 'hubble_patch': h_patch['filename'],
                 'observatory_patch': best_obs['filename'],
                 'separation_arcmin': best_dist
             })
     
-    # Salva pairs
+    # Salva pairs (questa parte resta invariata)
     pairs_file = output_dir / 'patch_pairs.json'
     with open(pairs_file, 'w') as f:
         json.dump({
@@ -882,9 +931,11 @@ def create_patch_pairs(hubble_patches, obs_patches, output_dir, logger):
             'pairs': pairs
         }, f, indent=2)
     
-    print(f"   ✓ {len(pairs)} coppie create")
+    print(f"   ✓ {len(pairs)} coppie create (file JSON)")
+    print(f"   ✓ {len(pairs)} cartelle coppie copiate in {pairs_folders_dir}")
     return pairs
 
+# ============================================================================
 
 def create_dataset_split(patches, output_dir, logger):
     """Crea split train/val/test"""
@@ -1071,6 +1122,9 @@ def main():
         print(f"   Analisi: {OUTPUT_DIR_ANALYSIS}")
     if mode in ['patches', 'both']:
         print(f"   Patches: {OUTPUT_DIR_PATCHES}")
+        # Mostra anche la nuova cartella delle coppie
+        if OUTPUT_DIR_PATCHES:
+             print(f"   Coppie:  {OUTPUT_DIR_PATCHES / 'paired_patches_folders'}")
     
     print(f"\n{'='*70}")
     print("GRAZIE PER AVER USATO LO SCRIPT UNIFICATO!")
