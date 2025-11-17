@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-STEP 5-6 UNIFICATO: ANALISI OVERLAP E ESTRAZIONE PATCHES
+STEP 6 e REPORT: ESTRAZIONE PATCHES e REPORT COMPLETO
 
 MODIFICATO:
-- Aggiunto menu iniziale per selezionare la cartella del target (se avviato da solo).
+- Rimossa completamente l'opzione 'Analisi Overlap' (Step 5).
+- Il menu ora offre solo 'Estrazione Patches' (Step 6) e 'Report Stato Completo'.
 - AGGIUNTO: Opzione 'Processa TUTTI' nel menu di selezione.
 - AGGIUNTO: Loop principale in main() per processare uno o più target.
 - Accetta BASE_DIR come argomento da riga di comando (da step2).
 - AGGIUNTO: Multi-threading per l'estrazione patches (Step 6).
 - AGGIUNTO: Multi-threading per l'accoppiamento patches (Step 6).
-- AGGIUNTO: Sostituzione dei file .json di metadati patch/coppie con report .md.
-- AGGIUNTO: Sostituzione di 'analisi_overlap_report.json' (Step 5) con un report .md.
-- AGGIUNTO: Menu di prosecuzione dopo la modalità "SOLO ANALISI".
-- CORRETTO: Typo 'Clock' in 'run_patches'.
+- AGGIUNTO: Report .md per i metadati delle patches.
+- AGGIUNTO: "Report Stato Completo" ora analizza OGNI FILE singolarmente.
 """
 
 import os
@@ -27,7 +26,7 @@ from astropy.io import fits
 from astropy.wcs import WCS
 from astropy.coordinates import SkyCoord
 import astropy.units as u
-import matplotlib.pyplot as plt
+# import matplotlib.pyplot as plt # Non più necessario
 from tqdm import tqdm
 import warnings
 import shutil
@@ -42,8 +41,8 @@ warnings.filterwarnings('ignore')
 # ============================================================================
 
 LOG_DIR_ROOT = Path(r'F:\Super Revolt Gaia\logs')
-TARGET_PATCH_ARCMIN_ANALYSIS = 1.0
-PATCH_OVERLAP_PERCENT_ANALYSIS = 10
+
+# Parametri Step 6
 TARGET_FOV_ARCMIN = 1
 OVERLAP_PERCENT = 25
 MIN_VALID_PERCENT = 50
@@ -96,271 +95,191 @@ def select_target_directory():
         except Exception as e: print(f"❌ Errore: {e}"); return []
 
 # ============================================================================
-# MENU PRINCIPALE E DI PROSEGUIMENTO (MODIFICATI)
+# MENU PRINCIPALE (SEMPLIFICATO)
 # ============================================================================
 
 def main_menu():
-    print("\n" + "🌟"*35); print("STEP 5-6 UNIFICATO: ANALISI & PATCHES".center(70)); print("🌟"*35)
+    print("\n" + "🌟"*35); print("MENU PRINCIPALE".center(70)); print("🌟"*35)
     print(f"\n📋 SCEGLI OPERAZIONE (verrà applicata a tutti i target selezionati):")
-    print(f"\n1️⃣  SOLO ANALISI (Step 5)")
-    print(f"\n2️⃣  SOLO ESTRAZIONE PATCHES (Step 6)")
-    print(f"\n3️⃣  ENTRAMBI (Step 5 + Step 6)")
-    while True:
-        print(f"\n" + "─"*70); choice = input("👉 Scegli opzione [1/2/3, default=3]: ").strip()
-        if choice == '1': print(f"\n✅ Selezionato: SOLO ANALISI"); return 'analysis'
-        elif choice == '2': print(f"\n✅ Selezionato: SOLO ESTRAZIONE PATCHES"); return 'patches'
-        elif choice in ('', '3'): print(f"\n✅ Selezionato: ENTRAMBI (Analisi + Patches)"); return 'both'
-        else: print(f"❌ Scelta non valida. Inserisci 1, 2 o 3.")
-
-def ask_continue_to_patches(target_list):
-    """
-    Chiede all'utente se vuole proseguire con l'estrazione Patches (Step 6).
-    """
-    print("\n" + "="*70); print("🎯 ANALISI (Step 5) COMPLETATA"); print("="*70)
-    print("\n📋 OPZIONI PROSSIMO STEP:\n   1️⃣  Continua con Estrazione Patches (Step 6)\n   2️⃣  Termina qui")
+    print(f"\n1️⃣  ESTRAZIONE PATCHES (Step 6)")
+    print(f"\n2️⃣ NON ANCORA FUNZIONANTE, FUNZIONA MALE LEGGE LE CARTELLE NON I FILE   REPORT STATO COMPLETO (Scansiona tutti i file)")
     
-    if len(target_list) > 1:
-        prompt_msg = f"per i {len(target_list)} target analizzati?"
-    else:
-        prompt_msg = f"per {target_list[0].name}?"
-
     while True:
-        print("\n" + "─"*70)
-        choice = input(f"👉 Vuoi continuare con l'estrazione delle Patches {prompt_msg} [S/n, default=S]: ").strip().lower()
-        if choice in ('', 's', 'si', 'y', 'yes'):
-            print("\n✅ Proseguimento con Estrazione Patches...")
-            return True
-        elif choice in ('n', 'no'):
-            print("\n✅ Terminato dopo l'analisi.")
-            return False
-        else:
-            print("❌ Scelta non valida. Inserisci S per Sì o N per No.")
+        print(f"\n" + "─"*70); choice = input("👉 Scegli opzione [1/2, default=1]: ").strip()
+        if choice in ('', '1'): print(f"\n✅ Selezionato: ESTRAZIONE PATCHES"); return 'patches'
+        elif choice == '2': print(f"\n✅ Selezionato: REPORT STATO COMPLETO"); return 'status_report'
+        else: print(f"❌ Scelta non valida. Inserisci 1 o 2.")
 
 # ============================================================================
-# STEP 5: ANALISI (MODIFICATO PER REPORT MD)
+# FUNZIONI REPORT STATO COMPLETO (MODIFICATE PER FILE SINGOLI)
 # ============================================================================
 
-class ImageAnalyzer:
-    def __init__(self, filepath):
-        self.filepath = Path(filepath); self.data = None; self.header = None; self.wcs = None; self.info = {}
-    def load(self):
-        try:
-            with fits.open(self.filepath) as hdul:
-                data_hdu = None
-                for i, hdu in enumerate(hdul):
-                    if hdu.data is not None and len(hdu.data.shape) >= 2: data_hdu = hdu; break
-                if data_hdu is None: return False
-                self.data = data_hdu.data; self.header = data_hdu.header
-                if len(self.data.shape) == 3: self.data = self.data[0]
-                ny, nx = self.data.shape
-                self.info = { 'filename': self.filepath.name, 'shape': (ny, nx), 'dtype': str(self.data.dtype), 'size_mb': round(self.data.nbytes / (1024**2), 2) }
-                valid_mask = np.isfinite(self.data); valid_data = self.data[valid_mask]
-                if len(valid_data) > 0:
-                    self.info['stats'] = { 'valid_pixels': int(valid_mask.sum()), 'coverage_percent': round(100 * valid_mask.sum() / self.data.size, 2),
-                                           'min': float(np.min(valid_data)), 'max': float(np.max(valid_data)), 'mean': float(np.mean(valid_data)), 'median': float(np.median(valid_data)) }
-                try:
-                    self.wcs = WCS(self.header)
-                    if self.wcs.has_celestial: self._analyze_wcs()
-                    else: self.wcs = None; return False
-                except: self.wcs = None; return False
-                return True
-        except Exception as e: return False
-    def _analyze_wcs(self):
-        ny, nx = self.data.shape; center = self.wcs.pixel_to_world(nx/2, ny/2); pixel_scale = self._get_pixel_scale()
-        corners = self.wcs.pixel_to_world([0, nx, nx, 0], [0, 0, ny, ny]); ra_vals = [c.ra.deg for c in corners]; dec_vals = [c.dec.deg for c in corners]
-        ra_span, dec_span = max(ra_vals) - min(ra_vals), max(dec_vals) - min(dec_vals)
-        self.info['wcs'] = { 'center_ra': float(center.ra.deg), 'center_dec': float(center.dec.deg), 'pixel_scale_arcsec': pixel_scale, 'pixel_scale_arcmin': pixel_scale / 60.0,
-                             'fov_ra_deg': ra_span, 'fov_dec_deg': dec_span, 'fov_ra_arcmin': ra_span * 60, 'fov_dec_arcmin': dec_span * 60,
-                             'ra_range': [min(ra_vals), max(ra_vals)], 'dec_range': [min(dec_vals), max(dec_vals)] }
-    def _get_pixel_scale(self):
-        try:
-            if hasattr(self.wcs.wcs, 'cd') and self.wcs.wcs.cd is not None: pixel_scale_deg = np.sqrt(self.wcs.wcs.cd[0,0]**2 + self.wcs.wcs.cd[0,1]**2)
-            elif hasattr(self.wcs.wcs, 'cdelt'): pixel_scale_deg = abs(self.wcs.wcs.cdelt[0])
-            else: p1 = self.wcs.pixel_to_world(0, 0); p2 = self.wcs.pixel_to_world(1, 0); pixel_scale_deg = p1.separation(p2).deg
-            return pixel_scale_deg * 3600
-        except: return None
-    def calculate_patch_size(self, target_arcmin):
-        if 'wcs' not in self.info or self.info['wcs']['pixel_scale_arcsec'] is None: return None
-        pixel_scale_arcsec = self.info['wcs']['pixel_scale_arcsec']; target_arcsec = target_arcmin * 60
-        patch_size_px = int(target_arcsec / pixel_scale_arcsec); patch_size_px = ((patch_size_px + 7) // 8) * 8
-        actual_arcsec = patch_size_px * pixel_scale_arcsec; actual_arcmin = actual_arcsec / 60; ny, nx = self.data.shape
-        n_x, n_y, total_no_overlap = nx // patch_size_px, ny // patch_size_px, (nx // patch_size_px) * (ny // patch_size_px)
-        step = int(patch_size_px * (1 - PATCH_OVERLAP_PERCENT_ANALYSIS/100))
-        n_x_overlap, n_y_overlap = (max(1, (nx - patch_size_px) // step + 1) if step > 0 else 1), (max(1, (ny - patch_size_px) // step + 1) if step > 0 else 1)
-        total_with_overlap = n_x_overlap * n_y_overlap
-        return { 'target_arcmin': target_arcmin, 'patch_size_px': patch_size_px, 'actual_size_arcmin': actual_arcmin, 'actual_size_arcsec': actual_arcsec,
-                 'patches_no_overlap': {'x': n_x, 'y': n_y, 'total': total_no_overlap}, 'patches_with_overlap': {'x': n_x_overlap, 'y': n_y_overlap, 'total': total_with_overlap} }
+def scan_directory_for_files(path):
+    """
+    Scansiona una directory e restituisce un elenco di dettagli per OGNI file.
+    """
+    file_details_list = []
+    try:
+        if not path.exists():
+            return [] # La cartella non esiste
+        
+        files = list(path.glob('*.fits')) + list(path.glob('*.fit'))
+        if not files:
+            return [] # La cartella esiste ma è vuota
+        
+        # Usa tqdm se la lista è lunga
+        file_iterator = files
+        if len(files) > 10:
+             file_iterator = tqdm(files, desc=f"   Scansione {path.name}", ncols=70, leave=False)
 
-class OverlapAnalyzer:
-    def __init__(self, img1, img2): self.img1 = img1; self.img2 = img2; self.overlap_info = None
-    def calculate_overlap(self):
-        if self.img1.wcs is None or self.img2.wcs is None: return None
-        wcs1, wcs2 = self.img1.info['wcs'], self.img2.info['wcs']
-        ra1_min, ra1_max = wcs1['ra_range']; ra2_min, ra2_max = wcs2['ra_range']
-        overlap_ra_min, overlap_ra_max = max(ra1_min, ra2_min), min(ra1_max, ra2_max)
-        dec1_min, dec1_max = wcs1['dec_range']; dec2_min, dec2_max = wcs2['dec_range']
-        overlap_dec_min, overlap_dec_max = max(dec1_min, dec2_min), min(dec1_max, dec2_max)
-        if overlap_ra_max <= overlap_ra_min or overlap_dec_max <= overlap_dec_min: return None
-        overlap_ra_span, overlap_dec_span = overlap_ra_max - overlap_ra_min, overlap_dec_max - overlap_dec_min
-        overlap_area_deg2 = overlap_ra_span * overlap_dec_span; overlap_area_arcmin2 = overlap_area_deg2 * 3600
-        area1, area2 = wcs1['fov_ra_deg'] * wcs1['fov_dec_deg'], wcs2['fov_ra_deg'] * wcs2['fov_dec_deg']
-        self.overlap_info = { 'overlap_ra_range': [overlap_ra_min, overlap_ra_max], 'overlap_dec_range': [overlap_dec_min, overlap_dec_max], 'overlap_ra_deg': overlap_ra_span, 'overlap_dec_deg': overlap_dec_span,
-                              'overlap_area_deg2': overlap_area_deg2, 'overlap_area_arcmin2': overlap_area_arcmin2, 'fraction_img1': overlap_area_deg2 / area1 if area1 > 0 else 0, 'fraction_img2': overlap_area_deg2 / area2 if area2 > 0 else 0 }
-        return self.overlap_info
-    def visualize(self, output_path):
-        if self.overlap_info is None: return
-        fig, ax = plt.subplots(figsize=(10, 8))
-        wcs1 = self.img1.info['wcs']; ra1, dec1 = wcs1['ra_range'], wcs1['dec_range']
-        ax.add_patch(plt.Rectangle((ra1[0], dec1[0]), ra1[1]-ra1[0], dec1[1]-dec1[0], fill=False, edgecolor='blue', linewidth=2, label=self.img1.filepath.name))
-        wcs2 = self.img2.info['wcs']; ra2, dec2 = wcs2['ra_range'], wcs2['dec_range']
-        ax.add_patch(plt.Rectangle((ra2[0], dec2[0]), ra2[1]-ra2[0], dec2[1]-dec2[0], fill=False, edgecolor='red', linewidth=2, label=self.img2.filepath.name))
-        ov = self.overlap_info
-        ax.add_patch(plt.Rectangle((ov['overlap_ra_range'][0], ov['overlap_dec_range'][0]), ov['overlap_ra_deg'], ov['overlap_dec_deg'], fill=True, facecolor='green', alpha=0.3, edgecolor='green', linewidth=2, label='Overlap'))
-        ax.set_xlabel('RA (deg)'); ax.set_ylabel('DEC (deg)'); ax.set_title('Image Overlap Analysis'); ax.legend(); ax.grid(True, alpha=0.3); ax.invert_xaxis()
-        plt.tight_layout(); plt.savefig(output_path, dpi=150, bbox_inches='tight'); plt.close()
+        for file_path in file_iterator:
+            details = {
+                'filename': file_path.name,
+                'size_mb': round(file_path.stat().st_size / (1024**2), 2),
+                'dimensions_px': 'N/A',
+                'wcs_ok': False
+            }
 
-def load_images_analysis(directory, label):
-    print(f"\n🔍 Caricamento {label}..."); files = list(directory.glob('*.fits')) + list(directory.glob('*.fit'))
-    if not files: print(f"   ⚠️  Nessun file trovato in {directory}"); return []
-    images = []
-    for fpath in files:
-        img = ImageAnalyzer(fpath)
-        if img.load(): images.append(img); print(f"   ✓ {img.filepath.name}: {img.info['shape']}")
-        else: print(f"   ✗ {img.filepath.name}: errore caricamento")
-    print(f"   Totale {label}: {len(images)}/{len(files)} immagini caricate"); return images
+            try:
+                with fits.open(file_path) as hdul:
+                    wcs_found = False
+                    dim_found = False
+                    for hdu in hdul:
+                        if hdu.data is not None and len(hdu.data.shape) >= 2:
+                            if not dim_found:
+                                # Prendi le dimensioni dal primo HDU con dati
+                                shape = hdu.data.shape
+                                if len(shape) == 3: # Cubo di dati
+                                    details['dimensions_px'] = f"{shape[2]}x{shape[1]} (Cubo {shape[0]})"
+                                else: # Immagine 2D
+                                    details['dimensions_px'] = f"{shape[1]}x{shape[0]}"
+                                dim_found = True
+                            
+                            # Controlla il WCS
+                            try:
+                                wcs = WCS(hdu.header)
+                                if wcs.has_celestial:
+                                    wcs_found = True
+                            except Exception:
+                                continue # Header WCS non valido in questo HDU
+                    
+                    details['wcs_ok'] = wcs_found
+            except Exception:
+                details['dimensions_px'] = 'Errore Lettura'
+                details['wcs_ok'] = False
+            
+            file_details_list.append(details)
+            
+        return file_details_list
+    
+    except Exception as e:
+        print(f"Errore scansione directory {path}: {e}")
+        return []
 
-def analyze_all_pairs(hubble_imgs, obs_imgs):
-    print(f"\n🔗 Analisi overlap tra {len(hubble_imgs)} Hubble e {len(obs_imgs)} Observatory..."); results = []
-    for h_img in hubble_imgs:
-        for o_img in obs_imgs:
-            analyzer = OverlapAnalyzer(h_img, o_img); overlap = analyzer.calculate_overlap()
-            if overlap and overlap['overlap_area_arcmin2'] > 0.1:
-                results.append({ 'hubble': h_img, 'observatory': o_img, 'overlap': overlap, 'analyzer': analyzer })
-    results.sort(key=lambda x: x['overlap']['overlap_area_arcmin2'], reverse=True); return results
+def save_comprehensive_report_md(results, output_path, base_dir_name):
+    """Salva il report di stato completo e dettagliato in Markdown."""
+    print(f"   ✍️  Scrittura Report Stato Completo: {output_path.name}")
+    def fmt_bool(val):
+        if val is True: return "✅ Sì"
+        if val is False: return "❌ No"
+        return "N/A"
 
-def print_patch_analysis(img, label):
-    print(f"\n📊 {label}: {img.filepath.name}\n   Dimensioni: {img.info['shape'][1]} × {img.info['shape'][0]} px")
-    if 'wcs' in img.info:
-        wcs = img.info['wcs']
-        print(f"   Pixel scale: {wcs['pixel_scale_arcsec']:.4f} arcsec/px\n   FOV: {wcs['fov_ra_arcmin']:.2f} × {wcs['fov_dec_arcmin']:.2f} arcmin\n   Centro: RA={wcs['center_ra']:.6f}°, DEC={wcs['center_dec']:.6f}°")
-    print(f"\n💡 DIMENSIONI PATCHES POSSIBILI:")
-    for target_arcmin in [0.5, 1.0, 2.0, 5.0]:
-        patch_info = img.calculate_patch_size(target_arcmin)
-        if patch_info:
-            print(f"\n   Target: {target_arcmin} arcmin\n      Patch size: {patch_info['patch_size_px']} × {patch_info['patch_size_px']} px\n      Actual size: {patch_info['actual_size_arcmin']:.4f} arcmin"
-                  f"\n      Patches (no overlap): {patch_info['patches_no_overlap']['total']}\n      Patches ({PATCH_OVERLAP_PERCENT_ANALYSIS}% overlap): {patch_info['patches_with_overlap']['total']}")
-
-# --- NUOVA FUNZIONE: REPORT MD PER ANALISI (STEP 5) ---
-def create_summary_report_md(hubble_imgs, obs_imgs, overlap_results, output_dir):
-    """Crea report riassuntivo dell'ANALISI (Step 5) in Markdown."""
-    output_path = output_dir / 'analisi_overlap_report.md'
-    print(f"\n   ✍️  Scrittura report MD: {output_path.name}")
     try:
         with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(f"# Report Analisi Overlap e Patches (Step 5)\n\n")
-            f.write(f"**Report generato il:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            f.write(f"--- \n")
+            f.write(f"# Report Stato Completo: {base_dir_name}\n\n")
+            f.write(f"**Generato il:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            f.write("Scansione dettagliata di tutti i file FITS in ogni cartella della pipeline.\n")
             
-            # --- Sezione Hubble ---
-            f.write(f"## 🛰️ Immagini Hubble Analizzate ({len(hubble_imgs)})\n\n")
-            f.write("| Immagine | Dimensioni (px) | Pixel Scale (\"/px) | FOV (arcmin) | Centro (RA, Dec) |\n")
-            f.write("| :--- | :--- | :--- | :--- | :--- |\n")
-            for img in hubble_imgs:
-                wcs_info = img.info.get('wcs', {})
-                shape = img.info.get('shape', ('N/A', 'N/A'))
-                scale = f"{wcs_info.get('pixel_scale_arcsec', 0):.4f}"
-                fov = f"{wcs_info.get('fov_ra_arcmin', 0):.2f} x {wcs_info.get('fov_dec_arcmin', 0):.2f}"
-                center = f"{wcs_info.get('center_ra', 0):.5f}, {wcs_info.get('center_dec', 0):.5f}"
-                f.write(f"| `{img.filepath.name}` | {shape[1]}x{shape[0]} | {scale} | {fov} | {center} |\n")
-            
-            # --- Sezione Observatory ---
-            f.write(f"\n## 📡 Immagini Observatory Analizzate ({len(obs_imgs)})\n\n")
-            f.write("| Immagine | Dimensioni (px) | Pixel Scale (\"/px) | FOV (arcmin) | Centro (RA, Dec) |\n")
-            f.write("| :--- | :--- | :--- | :--- | :--- |\n")
-            for img in obs_imgs:
-                wcs_info = img.info.get('wcs', {})
-                shape = img.info.get('shape', ('N/A', 'N/A'))
-                scale = f"{wcs_info.get('pixel_scale_arcsec', 0):.4f}"
-                fov = f"{wcs_info.get('fov_ra_arcmin', 0):.2f} x {wcs_info.get('fov_dec_arcmin', 0):.2f}"
-                center = f"{wcs_info.get('center_ra', 0):.5f}, {wcs_info.get('center_dec', 0):.5f}"
-                f.write(f"| `{img.filepath.name}` | {shape[1]}x{shape[0]} | {scale} | {fov} | {center} |\n")
+            for stage, folders in results.items():
+                f.write(f"\n---\n\n## {stage}\n\n")
+                if not folders:
+                    f.write("*(Nessuna cartella o file trovato)*\n")
+                    continue
+                
+                for folder in folders:
+                    path_str = str(folder['path']).replace('\\', '/')
+                    files = folder['files']
+                    f.write(f"### 📁 Cartella: `{path_str}`\n")
+                    f.write(f"**Totale File:** {len(files)}\n\n")
+                    
+                    if not files:
+                        f.write("*(Cartella vuota)*\n\n")
+                        continue
+                        
+                    # Scrivi la tabella per questa cartella
+                    f.write("| File | Dimensioni (px) | Dim. (MB) | WCS Valido |\n")
+                    f.write("| :--- | :--- | :--- | :--- |\n")
+                    
+                    total_mb = 0.0
+                    for file in files:
+                        total_mb += file['size_mb']
+                        f.write(f"| `{file['filename']}` | {file['dimensions_px']} | {file['size_mb']:.2f} | {fmt_bool(file['wcs_ok'])} |\n")
+                    
+                    f.write(f"| **Totale Cartella** | | **{total_mb:.2f} MB** | |\n\n")
 
-            # --- Sezione Overlap ---
-            f.write(f"\n---\n")
-            f.write(f"## 🔗 Risultati Overlap\n\n")
-            f.write(f"**Coppie con overlap trovate:** {len(overlap_results)}\n\n")
-            if overlap_results:
-                f.write(f"**Top 5 Matches (per area):**\n")
-                f.write("| Immagine Hubble | Immagine Observatory | Area Overlap (arcmin²) | Copertura Hubble | Copertura Observatory |\n")
-                f.write("| :--- | :--- | :--- | :--- | :--- |\n")
-                for result in overlap_results[:5]:
-                    h_file = result['hubble'].filepath.name
-                    o_file = result['observatory'].filepath.name
-                    area = f"{result['overlap']['overlap_area_arcmin2']:.2f}"
-                    cov_h = f"{result['overlap']['fraction_img1']*100:.1f}%"
-                    cov_o = f"{result['overlap']['fraction_img2']*100:.1f}%"
-                    f.write(f"| `{h_file}` | `{o_file}` | {area} | {cov_h} | {cov_o} |\n")
-            
-            # --- Sezione Raccomandazioni Patch ---
-            f.write(f"\n---\n")
-            f.write(f"## 💡 Raccomandazioni Patch (per 1.0 arcmin)\n\n")
-            if hubble_imgs:
-                h_patch = hubble_imgs[0].calculate_patch_size(1.0)
-                if h_patch:
-                    f.write(f"**Hubble (esempio):**\n")
-                    f.write(f"- Dimensione Patch: `{h_patch['patch_size_px']} x {h_patch['patch_size_px']} px`\n")
-                    f.write(f"- Dimensione Reale: `{h_patch['actual_size_arcmin']:.4f} arcmin`\n")
-                    f.write(f"- N. Patches (con {PATCH_OVERLAP_PERCENT_ANALYSIS}% overlap): `{h_patch['patches_with_overlap']['total']}`\n\n")
-            if obs_imgs:
-                o_patch = obs_imgs[0].calculate_patch_size(1.0)
-                if o_patch:
-                    f.write(f"**Observatory (esempio):**\n")
-                    f.write(f"- Dimensione Patch: `{o_patch['patch_size_px']} x {o_patch['patch_size_px']} px`\n")
-                    f.write(f"- Dimensione Reale: `{o_patch['actual_size_arcmin']:.4f} arcmin`\n")
-                    f.write(f"- N. Patches (con {PATCH_OVERLAP_PERCENT_ANALYSIS}% overlap): `{o_patch['patches_with_overlap']['total']}` (per immagine)\n\n")
     except Exception as e:
         print(f"   ❌ ERRORE: Impossibile scrivere il report MD {output_path.name}: {e}")
 
-# --- FUNZIONE RUN_ANALYSIS (MODIFICATA) ---
-def run_analysis(HUBBLE_DIR_ANALYSIS, OBS_DIR_ANALYSIS, OUTPUT_DIR_ANALYSIS):
-    print("\n" + "🔭"*35); print(f"STEP 5: ANALISI OVERLAP E PATCHES".center(70)); print("🔭"*35)
-    print(f"\n📂 CONFIGURAZIONE:\n   Hubble: {HUBBLE_DIR_ANALYSIS}\n   Observatory: {OBS_DIR_ANALYSIS}\n   Output: {OUTPUT_DIR_ANALYSIS}")
-    OUTPUT_DIR_ANALYSIS.mkdir(parents=True, exist_ok=True)
-    print(f"\n{'='*70}\nCARICAMENTO IMMAGINI\n{'='*70}")
-    hubble_imgs = load_images_analysis(HUBBLE_DIR_ANALYSIS, "HUBBLE")
-    obs_imgs = load_images_analysis(OBS_DIR_ANALYSIS, "OBSERVATORY")
-    if not hubble_imgs: print(f"\n❌ Nessuna immagine Hubble caricata!"); return False
-    if not obs_imgs: print(f"\n❌ Nessuna immagine Observatory caricata!"); return False
-    print(f"\n{'='*70}\nANALISI DIMENSIONI PATCHES\n{'='*70}")
-    print(f"\n🛰️  HUBBLE IMAGES:"); [print_patch_analysis(img, "HUBBLE") for img in hubble_imgs[:3]]
-    if len(hubble_imgs) > 3: print(f"\n   ℹ️  ... e altre {len(hubble_imgs) - 3} immagini Hubble")
-    print(f"\n📡 OBSERVATORY IMAGES:")
-    if obs_imgs: print_patch_analysis(obs_imgs[0], "OBSERVATORY (esempio)")
-    if len(obs_imgs) > 1: print(f"\n   ℹ️  Mostrata solo la prima immagine observatory")
-    overlap_results = analyze_all_pairs(hubble_imgs, obs_imgs)
-    print(f"\n{'='*70}\nRISULTATI OVERLAP\n{'='*70}")
-    if overlap_results:
-        print(f"\n✅ Trovate {len(overlap_results)} coppie con overlap!")
-        print(f"\n🏆 TOP 5 MATCHES:")
-        for i, result in enumerate(overlap_results[:5], 1):
-            print(f"\n   {i}. {result['hubble'].filepath.name} ↔ {result['observatory'].filepath.name}\n      Overlap area: {result['overlap']['overlap_area_arcmin2']:.2f} arcmin²"
-                  f"\n      Hubble coverage: {result['overlap']['fraction_img1']*100:.1f}%\n      Observatory coverage: {result['overlap']['fraction_img2']*100:.1f}%")
-        best = overlap_results[0]; viz_path = OUTPUT_DIR_ANALYSIS / 'overlap_best_match.png'; best['analyzer'].visualize(viz_path)
-        print(f"\n📊 Visualizzazione salvata: {viz_path}")
-    else: print(f"\n⚠️  Nessun overlap trovato!")
+def run_comprehensive_analysis(BASE_DIR):
+    """Esegue la scansione di tutte le cartelle e genera un report MD."""
+    print(f"\n🔬 Scansione completa del target: {BASE_DIR.name}...")
+    print(f"   (potrebbe richiedere tempo, apro ogni file FITS...)")
     
-    # --- MODIFICA: Chiama la nuova funzione MD ---
-    create_summary_report_md(hubble_imgs, obs_imgs, overlap_results, OUTPUT_DIR_ANALYSIS)
-    # --- FINE MODIFICA ---
+    # Definisce tutti i percorsi standard della pipeline
+    paths_to_scan = {
+        "1. Originarie": [
+            BASE_DIR / '1_originarie' / 'local_raw',
+            BASE_DIR / '1_originarie' / 'img_lights',
+        ],
+        "2. WCS Aggiunto (Step 1)": [
+            BASE_DIR / '2_wcs' / 'osservatorio',
+            BASE_DIR / '2_wcs' / 'hubble',
+        ],
+        "3. Registrate (Step 2)": [
+            BASE_DIR / '3_registered_native' / 'osservatorio',
+            BASE_DIR / '3_registered_native' / 'hubble',
+        ],
+        "4. Cropped (Step 3)": [
+            BASE_DIR / '4_cropped' / 'osservatorio',
+            BASE_DIR / '4_cropped' / 'hubble',
+        ],
+        "5. Mosaici (Step 4)": [
+            BASE_DIR / '5_mosaics',
+        ],
+        "6. Patches (da Cropped)": [
+            BASE_DIR / '6_patches_from_cropped' / 'observatory_native',
+            BASE_DIR / '6_patches_from_cropped' / 'hubble_native',
+            BASE_DIR / '6_patches_from_cropped' / 'paired_patches_folders',
+        ],
+        "6. Patches (da Registered)": [
+            BASE_DIR / '6_patches_from_registered' / 'observatory_native',
+            BASE_DIR / '6_patches_from_registered' / 'hubble_native',
+            BASE_DIR / '6_patches_from_registered' / 'paired_patches_folders',
+        ]
+    }
+
+    results = {}
     
-    print(f"\n{'='*70}\n💡 RACCOMANDAZIONI PATCHES\n{'='*70}")
-    if hubble_imgs and obs_imgs:
-        h_patch, o_patch = hubble_imgs[0].calculate_patch_size(1.0), obs_imgs[0].calculate_patch_size(1.0)
-        if h_patch and o_patch:
-            print(f"\n📐 DIMENSIONI CONSIGLIATE (1 arcmin target):")
-            print(f"\n   Hubble:\n      Patch size: {h_patch['patch_size_px']} × {h_patch['patch_size_px']} px\n      Patches totali: {h_patch['patches_with_overlap']['total']}")
-            print(f"\n   Observatory:\n      Patch size: {o_patch['patch_size_px']} × {o_patch['patch_size_px']} px\n      Patches totali: {o_patch['patches_with_overlap']['total'] * len(obs_imgs)}")
-    print(f"\n{'='*70}\n✅ ANALISI (Step 5) COMPLETATA\n{'='*70}\n📁 Output salvato in: {OUTPUT_DIR_ANALYSIS}")
+    # Non si può usare tqdm qui perché la funzione interna ha il suo
+    for stage, paths in paths_to_scan.items():
+        print(f"\n--- Fase: {stage} ---")
+        stage_results = []
+        for path in paths:
+            file_list = scan_directory_for_files(path)
+            # Aggiungi solo se la cartella esiste e/o ha file
+            if file_list or path.exists():
+                stage_results.append({
+                    'path': path.relative_to(BASE_DIR.parent),
+                    'files': file_list
+                })
+        
+        if stage_results:
+            results[stage] = stage_results
+
+    output_path = BASE_DIR / "report_stato_completo.md"
+    save_comprehensive_report_md(results, output_path, BASE_DIR.name)
+    
+    print(f"\n✅ Report Stato Completo salvato in: {output_path}")
     return True
 
 # ============================================================================
@@ -438,10 +357,6 @@ def extract_patches_from_image(fits_path, output_dir, source_label, logger):
     except Exception as e:
         logger.error(f"Errore in {fits_path.name}: {e}"); return []
 
-# ============================================================================
-# FUNZIONI REPORT MD (PER STEP 6)
-# ============================================================================
-
 def save_patch_metadata_md(patches_info, output_path, label):
     """Salva i metadati delle patch in un file Markdown leggibile."""
     print(f"   ✍️  Scrittura report MD: {output_path.name}")
@@ -498,10 +413,6 @@ def save_summary_metadata_md(metadata, output_path):
             f.write(f"- **Coppie Create:** {metadata.get('pairs', {}).get('num_pairs', 0)}\n")
     except Exception as e:
         print(f"   ❌ ERRORE: Impossibile scrivere il report MD {output_path.name}: {e}")
-
-# ============================================================================
-# FUNZIONI PATCH MODIFICATE (per chiamare i report MD)
-# ============================================================================
 
 def extract_all_patches(input_dir, output_dir, label, logger):
     """Estrae patches da tutte le immagini (con multithreading)"""
@@ -619,7 +530,7 @@ def run_patches(BASE_DIR, INPUT_CROPPED_HUBBLE, INPUT_CROPPED_OBSERVATORY, INPUT
     if INPUT_HUBBLE.exists(): hubble_patches = extract_all_patches(INPUT_HUBBLE, OUTPUT_HUBBLE_PATCHES, 'hubble', logger)
     if INPUT_OBSERVATORY.exists(): obs_patches = extract_all_patches(INPUT_OBSERVATORY, OUTPUT_OBS_PATCHES, 'observatory', logger)
     
-    # --- CORREZIONE TYPO ---
+    # --- CORREZIONE TYPO (da 'Clock' a '*70') ---
     print(f"\n{'='*70}\n📊 RIEPILOGO ESTRAZIONE\n{'='*70}")
     # --- FINE CORREZIONE ---
     
@@ -645,7 +556,7 @@ def run_patches(BASE_DIR, INPUT_CROPPED_HUBBLE, INPUT_CROPPED_OBSERVATORY, INPUT
     return True
 
 # ============================================================================
-# MAIN (MODIFICATA PER LOOP E MENU PROSECUZIONE)
+# MAIN (SEMPLIFICATO)
 # ============================================================================
 
 def main():
@@ -669,60 +580,20 @@ def main():
     mode = main_menu()
 
     # Liste per tenere traccia di cosa fare
-    targets_to_analyze = []
     targets_to_patch = []
+    targets_to_report = []
     
-    if mode == 'analysis':
-        targets_to_analyze = list(target_dirs)
-    elif mode == 'patches':
+    if mode == 'patches':
         targets_to_patch = list(target_dirs)
-    elif mode == 'both':
-        targets_to_analyze = list(target_dirs)
-        targets_to_patch = list(target_dirs) # Verranno filtrati se l'analisi fallisce
+    elif mode == 'status_report':
+        targets_to_report = list(target_dirs)
     
-    successful_analysis_targets = []
-    failed_analysis_targets = []
-
-    # --- FASE 1: ANALISI (se richiesta) ---
-    if targets_to_analyze:
-        print("\n" + "="*70); print("INIZIO FASE 1: ANALISI OVERLAP (Step 5)"); print("="*70)
-        for BASE_DIR in targets_to_analyze:
-            print("\n" + "🚀"*35); print(f"TARGET ANALISI: {BASE_DIR.name}".center(70)); print("🚀"*35)
-            start_time_target = time.time()
-            HUBBLE_DIR_ANALYSIS = BASE_DIR / '4_cropped' / 'hubble'
-            OBS_DIR_ANALYSIS = BASE_DIR / '4_cropped' / 'observatory'
-            OUTPUT_DIR_ANALYSIS = BASE_DIR / '5_analisi_overlap'
-            try:
-                success = run_analysis(HUBBLE_DIR_ANALYSIS, OBS_DIR_ANALYSIS, OUTPUT_DIR_ANALYSIS)
-                if success:
-                    successful_analysis_targets.append(BASE_DIR)
-                else:
-                    failed_analysis_targets.append(BASE_DIR)
-                    if mode == 'both' and BASE_DIR in targets_to_patch: # Se 'both', non fare patch
-                        targets_to_patch.remove(BASE_DIR)
-            except Exception as e:
-                print(f"\n❌ ERRORE CRITICO (Analisi) su {BASE_DIR.name}: {e}")
-                import traceback; traceback.print_exc()
-                failed_analysis_targets.append(BASE_DIR)
-                if mode == 'both' and BASE_DIR in targets_to_patch:
-                    targets_to_patch.remove(BASE_DIR)
-            elapsed_target = time.time() - start_time_target
-            print(f"⏱️  Tempo analisi per {BASE_DIR.name}: {elapsed_target:.1f} secondi")
-
-    # --- MENU INTERMEDIO (se 'analysis' e successo) ---
-    if mode == 'analysis' and successful_analysis_targets:
-        if ask_continue_to_patches(successful_analysis_targets):
-            # Utente ha detto sì, aggiungi i target alla lista patch
-            targets_to_patch = successful_analysis_targets
-        else:
-            targets_to_patch = [] # Utente ha detto no
-
-    # --- FASE 2: PATCHES (se richiesta) ---
+    # --- FASE 1: PATCHES (se richiesta) ---
     successful_patch_targets = []
     failed_patch_targets = []
     
     if targets_to_patch:
-        print("\n" + "="*70); print("INIZIO FASE 2: ESTRAZIONE PATCHES (Step 6)"); print("="*70)
+        print("\n" + "="*70); print("INIZIO FASE: ESTRAZIONE PATCHES (Step 6)"); print("="*70)
         for BASE_DIR in targets_to_patch:
             print("\n" + "🚀"*35); print(f"TARGET PATCH: {BASE_DIR.name}".center(70)); print("🚀"*35)
             start_time_target = time.time()
@@ -743,16 +614,38 @@ def main():
             elapsed_target = time.time() - start_time_target
             print(f"⏱️  Tempo patches per {BASE_DIR.name}: {elapsed_target:.1f} secondi")
 
+    # --- FASE 2: REPORT STATO COMPLETO (se richiesta) ---
+    successful_report_targets = []
+    failed_report_targets = []
+    
+    if targets_to_report:
+        print("\n" + "="*70); print("INIZIO FASE: REPORT STATO COMPLETO"); print("="*70)
+        for BASE_DIR in targets_to_report:
+            print("\n" + "🚀"*35); print(f"TARGET REPORT: {BASE_DIR.name}".center(70)); print("🚀"*35)
+            start_time_target = time.time()
+            try:
+                success = run_comprehensive_analysis(BASE_DIR)
+                if success:
+                    successful_report_targets.append(BASE_DIR)
+                else:
+                    failed_report_targets.append(BASE_DIR)
+            except Exception as e:
+                print(f"\n❌ ERRORE CRITICO (Report) su {BASE_DIR.name}: {e}")
+                failed_report_targets.append(BASE_DIR)
+            elapsed_target = time.time() - start_time_target
+            print(f"⏱️  Tempo report per {BASE_DIR.name}: {elapsed_target:.1f} secondi")
+
     # --- RIEPILOGO FINALE ---
     elapsed_total = time.time() - start_time_total
-    print(f"\n" + "="*70); print("COMPLETAMENTO PIPELINE (Step 5-6)"); print("="*70)
+    print(f"\n" + "="*70); print("COMPLETAMENTO OPERAZIONI"); print("="*70)
+    print(f"   Modalità eseguita: {mode.upper()}")
     print(f"   Target totali selezionati: {len(target_dirs)}")
-    if targets_to_analyze:
-        print(f"   Analisi (Step 5): {len(successful_analysis_targets)} success, {len(failed_analysis_targets)} fail")
     if targets_to_patch:
         print(f"   Patches (Step 6): {len(successful_patch_targets)} success, {len(failed_patch_targets)} fail")
+    if targets_to_report:
+        print(f"   Report Stato: {len(successful_report_targets)} success, {len(failed_report_targets)} fail")
     print(f"\n   ⏱️  Tempo totale batch: {elapsed_total:.1f} secondi ({elapsed_total/60:.1f} minuti)")
-    print(f"\n{'='*70}\nGRAZIE PER AVER USATO LO SCRIPT UNIFICATO!\n{'='*70}")
+    print(f"\n{'='*70}\nGRAZIE PER AVER USATO LO SCRIPT!\n{'='*70}")
 
 if __name__ == "__main__":
     try:
