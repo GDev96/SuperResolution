@@ -1,15 +1,6 @@
 """
 PIPELINE COMPLETO: CONVERSIONE WCS + REGISTRAZIONE
 Combina Step 1 (Conversione WCS) e Step 2 (Registrazione) in un unico script.
-Gli output dei due step rimangono separati e distinti.
-Tutti i metodi sono mantenuti ESATTAMENTE come negli script originali.
-
-MODIFICATO:
-- Aggiunto menu per avviare step2_croppedmosaico.py (Step 3+4)
-- Aggiunto menu iniziale per selezionare la cartella del target.
-- AGGIUNTO: Opzione 'Processa TUTTI' nel menu di selezione.
-- AGGIUNTO: Loop principale in main() per processare uno o più target.
-- Tutti i percorsi sono ora relativi alla cartella del target selezionata.
 """
 
 import os
@@ -33,6 +24,19 @@ import subprocess
 
 warnings.filterwarnings('ignore', category=fits.verify.VerifyWarning)
 
+# ============================================================================
+# CONFIGURAZIONE PATH ASSOLUTI
+# ============================================================================
+# Definizione della radice del progetto
+PROJECT_ROOT = Path(r"F:\Super Revolt Gaia\SuperResolution")
+
+# Percorsi assoluti derivati
+ROOT_DATA_DIR = PROJECT_ROOT / "data"
+LOG_DIR_ROOT = PROJECT_ROOT / "logs"
+SCRIPTS_DIR = PROJECT_ROOT / "finale"
+
+# ============================================================================
+
 try:
     from reproject import reproject_interp
     REPROJECT_AVAILABLE = True
@@ -44,25 +48,25 @@ except ImportError:
     print("Installa con: pip install reproject")
     print("="*70)
 
+NUM_THREADS = 1
+REPROJECT_ORDER = 'bilinear'
+log_lock = threading.Lock()
+
 # ============================================================================
-# NUOVA FUNZIONE: SELEZIONE CARTELLA TARGET (MODIFICATA)
+# NUOVA FUNZIONE: SELEZIONE CARTELLA TARGET
 # ============================================================================
 
 def select_target_directory():
     """
     Mostra un menu per selezionare una o TUTTE le cartelle target.
-    Restituisce:
-    - Elenco di Path (con uno o più elementi)
-    - Elenco vuoto (se 'q' o errore)
     """
-    ROOT_DATA_DIR = Path(r'F:\Super Revolt Gaia\SuperResolution\data')
-
     print("\n" + "📂"*35)
     print("SELEZIONE CARTELLA TARGET".center(70))
     print("📂"*35)
     print(f"\nScansione sottocartelle in: {ROOT_DATA_DIR}")
 
     try:
+        # Usa il percorso assoluto definito in alto
         subdirs = [d for d in ROOT_DATA_DIR.iterdir() if d.is_dir()]
     except Exception as e:
         print(f"\n❌ ERRORE: Impossibile leggere la cartella {ROOT_DATA_DIR}")
@@ -75,12 +79,10 @@ def select_target_directory():
         return []
 
     print("\nCartelle target disponibili:")
-    # === MODIFICA: Aggiunta opzione 0 ===
     print(f"   0: ✨ Processa TUTTI i {len(subdirs)} target")
     print("   " + "─"*30)
     for i, dir_path in enumerate(subdirs):
         print(f"   {i+1}: {dir_path.name}")
-    # === FINE MODIFICA ===
 
     while True:
         print("\n" + "─"*70)
@@ -89,22 +91,20 @@ def select_target_directory():
 
             if choice_str.lower() == 'q':
                 print("👋 Uscita.")
-                return [] # Restituisce lista vuota
+                return [] 
 
             choice = int(choice_str)
 
-            # === MODIFICA: Gestione opzione 0 ===
             if choice == 0:
                 print(f"\n✅ Selezionati TUTTI i {len(subdirs)} target.")
-                return subdirs # Restituisce la lista completa
-            # === FINE MODIFICA ===
+                return subdirs 
             
             choice_idx = choice - 1
             if 0 <= choice_idx < len(subdirs):
                 selected_dir = subdirs[choice_idx]
                 print(f"\n✅ Cartella selezionata: {selected_dir.name}")
                 print(f"   Percorso completo: {selected_dir}")
-                return [selected_dir]  # Restituisce lista con un elemento
+                return [selected_dir]
             else:
                 print(f"❌ Scelta non valida. Inserisci un numero tra 0 e {len(subdirs)}.")
         except ValueError:
@@ -114,28 +114,16 @@ def select_target_directory():
             return []
 
 # ============================================================================
-# CONFIGURAZIONE GLOBALE
-# ============================================================================
-
-SCRIPT_DIR = Path(__file__).resolve().parent  # C:\...\SuperResolution\finale
-PROJECT_ROOT = SCRIPT_DIR.parent               # C:\...\SuperResolution
-LOG_DIR_ROOT = PROJECT_ROOT / 'logs'           # C:\...\SuperResolution\logs
-
-NUM_THREADS = 1
-REPROJECT_ORDER = 'bilinear'
-log_lock = threading.Lock()
-
-# ============================================================================
 # SETUP LOGGING
 # ============================================================================
 
 def setup_logging():
     """Configura logging per l'intera pipeline."""
+    # Usa il percorso assoluto definito in alto
     os.makedirs(LOG_DIR_ROOT, exist_ok=True)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     log_filename = LOG_DIR_ROOT / f'unified_pipeline_{timestamp}.log'
 
-    # ✅ NUOVO: Rimuovi handler esistenti per evitare duplicati
     root_logger = logging.getLogger()
     if root_logger.hasHandlers():
         root_logger.handlers.clear()
@@ -151,7 +139,6 @@ def setup_logging():
     
     logger = logging.getLogger(__name__)
     
-    # ✅ NUOVO: Log della configurazione path (debug)
     logger.info("=" * 80)
     logger.info(f"LOG FILE: {log_filename}")
     logger.info("=" * 80)
@@ -670,7 +657,6 @@ def main_step2(INPUT_HUBBLE, INPUT_OBSERVATORY, OUTPUT_HUBBLE, OUTPUT_OBSERVATOR
 def main():
     """Funzione principale della pipeline."""
     
-    # --- MODIFICA: Log e selezione avvengono prima del loop ---
     logger = setup_logging()
     
     # Seleziona uno o più target
@@ -678,7 +664,6 @@ def main():
     if not target_dirs:
         print("Nessun target selezionato. Uscita.")
         return
-    # --- FINE MODIFICA ---
 
     logger.info("=" * 60)
     logger.info("PIPELINE UNIFICATA: STEP 1 + STEP 2")
@@ -695,7 +680,6 @@ def main():
     successful_targets = []
     failed_targets = []
 
-    # --- MODIFICA: Loop principale sui target selezionati ---
     for BASE_DIR in target_dirs:
         print("\n" + "🚀"*35)
         print(f"INIZIO ELABORAZIONE TARGET: {BASE_DIR.name}".center(70))
@@ -739,8 +723,6 @@ def main():
             
         print(f"⏱️ Tempo totale per {BASE_DIR.name}: {step1_time + step2_time:.2f}s")
 
-    # --- FINE MODIFICA: Fine loop ---
-
     # RIEPILOGO FINALE
     elapsed_total = time.time() - start_time_total
     print("\n" + "=" * 70)
@@ -759,28 +741,25 @@ def main():
         print("\n❌ Nessun target completato con successo.")
         return
 
-    # === MODIFICA: Chiede di continuare e avvia lo script successivo in loop ===
     if ask_continue_to_cropping():
         try:
-            script_dir = Path(__file__).parent
-            next_script = script_dir / 'step2_croppedmosaico.py'
+            # Usa il percorso assoluto definito in alto
+            next_script = SCRIPTS_DIR / 'step2_croppedmosaico.py'
             
             if next_script.exists():
                 print(f"\n🚀 Avvio Step 3+4 in loop per {len(successful_targets)} target...")
                 for BASE_DIR in successful_targets:
                     print(f"\n--- Avvio per {BASE_DIR.name} ---")
-                    # Passa il BASE_DIR come argomento
                     subprocess.run([sys.executable, str(next_script), str(BASE_DIR)])
                     print(f"--- Completato {BASE_DIR.name} ---")
             else:
-                print(f"\n⚠️  Script {next_script.name} non trovato nella directory {script_dir}")
+                print(f"\n⚠️  Script {next_script.name} non trovato nella directory {SCRIPTS_DIR}")
                 print(f"   Eseguilo manualmente quando pronto")
         except Exception as e:
             print(f"\n⚠️  Impossibile avviare automaticamente {next_script.name}: {e}")
             print(f"   Eseguilo manualmente: python {next_script.name}")
     else:
         print("\n👋 Arrivederci!")
-    # === FINE MODIFICA ===
 
 
 if __name__ == "__main__":

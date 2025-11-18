@@ -2,15 +2,6 @@
 STEP 3+4: RITAGLIO IMMAGINI REGISTRATE E CREAZIONE MOSAICO
 1. Ritaglia tutte le immagini registrate alle dimensioni dell'immagine più piccola
 2. Crea un mosaico (media) da tutte le immagini ritagliate
-CON MENU DI PROSEGUIMENTO TRA RITAGLIO E MOSAICO
-
-MODIFICATO:
-- Aggiunto menu per avviare step3_analizzapatch.py (passando BASE_DIR)
-- Aggiunto menu iniziale per selezionare la cartella del target (se avviato da solo).
-- AGGIUNTO: Opzione 'Processa TUTTI' nel menu di selezione.
-- AGGIUNTO: Loop principale in main() per processare uno o più target.
-- Accetta BASE_DIR come argomento da riga di comando (da step1).
-- Tutti i percorsi sono ora relativi alla cartella del target selezionata (BASE_DIR).
 """
 
 import os
@@ -27,17 +18,23 @@ import subprocess
 warnings.filterwarnings('ignore')
 
 # ============================================================================
-# NUOVA FUNZIONE: SELEZIONE CARTELLA TARGET (MODIFICATA)
+# CONFIGURAZIONE PATH ASSOLUTI
+# ============================================================================
+# Definizione della radice del progetto
+PROJECT_ROOT = Path(r"F:\Super Revolt Gaia\SuperResolution")
+
+# Percorsi assoluti derivati
+ROOT_DATA_DIR = PROJECT_ROOT / "data"
+SCRIPTS_DIR = PROJECT_ROOT / "finale"
 # ============================================================================
 
-ROOT_DATA_DIR = Path(r'F:\Super Revolt Gaia\SuperResolution\data')
+# ============================================================================
+# NUOVA FUNZIONE: SELEZIONE CARTELLA TARGET
+# ============================================================================
 
 def select_target_directory():
     """
     Mostra un menu per selezionare una o TUTTE le cartelle target.
-    Restituisce:
-    - Elenco di Path (con uno o più elementi)
-    - Elenco vuoto (se 'q' o errore)
     """
     print("\n" + "📂"*35)
     print("SELEZIONE CARTELLA TARGET".center(70))
@@ -45,6 +42,7 @@ def select_target_directory():
     print(f"\nScansione sottocartelle in: {ROOT_DATA_DIR}")
 
     try:
+        # Usa il percorso assoluto definito in alto
         subdirs = [d for d in ROOT_DATA_DIR.iterdir() if d.is_dir()]
     except Exception as e:
         print(f"\n❌ ERRORE: Impossibile leggere la cartella {ROOT_DATA_DIR}")
@@ -304,21 +302,17 @@ def ask_continue_to_mosaic():
 def ask_continue_to_step3(target_list):
     """
     Chiede all'utente se vuole proseguire con Step 3 (Analisi Patches).
-    Args:
-        target_list (list): Lista dei target (Path) processati con successo.
     """
-    if not target_list: # Se la lista è vuota, non chiedere nulla
+    if not target_list:
         return False
         
     print("\n" + "="*70); print("🎯 FASI PRECEDENTI COMPLETATE"); print("="*70)
     print("\n📋 OPZIONI PROSSIMO STEP:\n   1️⃣  Continua con Step 5+6 (Analisi e Patches)\n   2️⃣  Termina qui")
     
-    # --- MODIFICA: Prompt dinamico ---
     if len(target_list) > 1:
         prompt_msg = f"per i {len(target_list)} target processati?"
     else:
         prompt_msg = f"per {target_list[0].name}?"
-    # --- FINE MODIFICA ---
 
     while True:
         print("\n" + "─"*70)
@@ -340,20 +334,19 @@ def ask_continue_to_step3(target_list):
 def main():
     """Funzione principale che esegue ritaglio e creazione mosaico."""
     
-    # --- MODIFICA: Gestione lista target ---
+    # Gestione lista target
     target_dirs = []
     if len(sys.argv) > 1:
         # Se avviato da step1, prende UN SOLO BASE_DIR dall'argomento
         target_dirs = [Path(sys.argv[1])]
         print(f"🚀 Avviato da script precedente. Target: {target_dirs[0].name}")
     else:
-        # Se avviato da solo, mostra il menu (che restituisce una lista)
+        # Se avviato da solo, mostra il menu
         target_dirs = select_target_directory()
     
     if not target_dirs:
         print("Nessun target selezionato. Uscita.")
         return
-    # --- FINE MODIFICA ---
 
     print("\n" + "="*70)
     print("PIPELINE: RITAGLIO IMMAGINI + CREAZIONE MOSAICO".center(70))
@@ -362,9 +355,8 @@ def main():
     print("="*70)
     
     start_time_total = time.time()
-    successful_targets_to_pass = [] # Lista dei target da passare a step3
+    successful_targets_to_pass = []
 
-    # --- MODIFICA: Loop principale sui target ---
     for BASE_DIR in target_dirs:
         print("\n" + "🚀"*35)
         print(f"INIZIO ELABORAZIONE TARGET: {BASE_DIR.name}".center(70))
@@ -390,7 +382,7 @@ def main():
         
         if not crop_success:
             print(f"\n❌ Pipeline interrotta per {BASE_DIR.name}: errore durante il ritaglio.")
-            continue # Salta al prossimo target
+            continue 
         
         crop_time = time.time() - start_time_target
         
@@ -403,14 +395,11 @@ def main():
             if mosaic_success:
                 print(f"\n⏱️  Tempo mosaico: {mosaic_time:.1f} secondi")
 
-        # Aggiungi ai successi solo se il ritaglio è andato a buon fine
         successful_targets_to_pass.append(BASE_DIR)
         
         elapsed_target = time.time() - start_time_target
         print(f"\n⏱️  Tempo totale per {BASE_DIR.name}: {elapsed_target:.1f} secondi")
         
-    # --- FINE MODIFICA: Fine loop ---
-
     elapsed_total = time.time() - start_time_total
     print("\n" + "="*70)
     print("📊 RIEPILOGO BATCH (Step 3+4)")
@@ -423,11 +412,10 @@ def main():
         print("\nNessun target completato. Uscita.")
         return
 
-    # --- MODIFICA: Avvio step3 in loop ---
     if ask_continue_to_step3(successful_targets_to_pass):
         try:
-            script_dir = Path(__file__).parent
-            step3_script = script_dir / 'step3_analizzapatch.py'
+            # Usa il percorso assoluto definito in alto
+            step3_script = SCRIPTS_DIR / 'step3_analizzapatch.py'
             
             if step3_script.exists():
                 print(f"\n🚀 Avvio Step 5+6 in loop per {len(successful_targets_to_pass)} target...")
@@ -436,12 +424,11 @@ def main():
                     subprocess.run([sys.executable, str(step3_script), str(BASE_DIR)])
                     print(f"--- Completato {BASE_DIR.name} ---")
             else:
-                print(f"\n⚠️  Script {step3_script.name} non trovato nella directory {script_dir}")
+                print(f"\n⚠️  Script {step3_script.name} non trovato nella directory {SCRIPTS_DIR}")
         except Exception as e:
             print(f"\n⚠️  Impossibile avviare automaticamente {step3_script.name}: {e}")
     else:
         print("\n👋 Arrivederci!")
-    # --- FINE MODIFICA ---
 
 if __name__ == "__main__":
     main()

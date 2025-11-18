@@ -1,14 +1,5 @@
 """
 PIPELINE SUPER-REVOLT GAIA - STEP 6 & REPORTING
------------------------------------------------
-6. Estrazione Patches: Divide le immagini grandi in piccoli quadrati (patches) 
-   usando una finestra scorrevole (sliding window) con sovrapposizione.
-   Successivamente, accoppia le patch di Hubble (High Res) con quelle dell'Osservatorio (Low Res)
-   basandosi sulle coordinate celesti (matching spaziale).
-
-Funzionalità Aggiuntive:
-- Generazione Dataset Split (Train/Val/Test).
-- Reportistica completa in Markdown.
 """
 
 import os
@@ -31,6 +22,16 @@ import astropy.units as u
 
 warnings.filterwarnings('ignore')
 
+# ============================================================================
+# CONFIGURAZIONE PATH ASSOLUTI
+# ============================================================================
+# Definizione della radice del progetto
+PROJECT_ROOT = Path(r"F:\Super Revolt Gaia\SuperResolution")
+
+# Percorsi assoluti derivati
+LOGS_DIR = PROJECT_ROOT / "logs"
+# ============================================================================
+
 # --- PARAMETRI DATASET ---
 TARGET_FOV_ARCMIN = 1       # Dimensione angolare della patch (1 arcominuto)
 OVERLAP_PERCENT = 25        # Sovrapposizione tra patch adiacenti
@@ -41,7 +42,8 @@ NUM_THREADS = 7
 # --- LOGGING & UTILS ---
 
 def setup_logger(base_dir):
-    log_dir = Path(r'F:\Super Revolt Gaia\logs')
+    # Usa il percorso assoluto definito in alto
+    log_dir = LOGS_DIR
     log_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         filename=log_dir / f'patches_{base_dir.name}_{int(time.time())}.log',
@@ -51,7 +53,7 @@ def setup_logger(base_dir):
     return logging.getLogger()
 
 # -----------------------------------------------------------------------------
-# ESTRAZIONE PATCHES
+# ESTRAZIONE PATCHES (Invariata)
 # -----------------------------------------------------------------------------
 
 def extract_patches_worker(fits_path, output_dir, prefix, logger):
@@ -124,7 +126,7 @@ def extract_patches_worker(fits_path, output_dir, prefix, logger):
         return []
 
 # -----------------------------------------------------------------------------
-# ACCOPPIAMENTO (PAIRING)
+# ACCOPPIAMENTO (PAIRING) (Invariata)
 # -----------------------------------------------------------------------------
 
 def pair_patches(h_patches, o_patches, output_dir):
