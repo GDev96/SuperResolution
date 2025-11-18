@@ -1,0 +1,46 @@
+{
+  "timestamp": "2025-11-17T18:23:55.678985",
+  "train_ratio": 0.7,
+  "val_ratio": 0.15,
+  "test_ratio": 0.15,
+  "splits": {
+    "train": [
+      "hubble_reg_hst_05237_02_wfpc2_f656n_wf_drz_wcs_p0004.fits",
+      "hubble_reg_hst_05237_02_wfpc2_f656n_wf_drz_wcs_p0012.fits",
+      "hubble_reg_hst_05773_03_wfpc2_f656n_wf_drz_wcs_p0008.fits",
+      "hubble_reg_hst_05773_03_wfpc2_f656n_wf_drz_wcs_p0015.fits",
+      "hubble_reg_hst_05773_03_wfpc2_f656n_wf_drz_wcs_p0003.fits",
+      "hubble_reg_hst_05237_02_wfpc2_f656n_wf_drz_wcs_p0015.fits",
+      "hubble_reg_hst_05237_02_wfpc2_f656n_wf_drz_wcs_p0005.fits",
+      "hubble_reg_hst_05773_03_wfpc2_f656n_wf_drz_wcs_p0004.fits",
+      "hubble_reg_hst_05237_02_wfpc2_f656n_wf_drz_wcs_p0002.fits",
+      "hubble_reg_hst_05773_03_wfpc2_f656n_wf_drz_wcs_p0009.fits",
+      "hubble_reg_hst_05237_02_wfpc2_f656n_wf_drz_wcs_p0008.fits",
+      "hubble_reg_hst_05237_02_wfpc2_f656n_wf_drz_wcs_p0003.fits",
+      "hubble_reg_hst_05773_03_wfpc2_f656n_wf_drz_wcs_p0000.fits",
+      "hubble_reg_hst_05237_02_wfpc2_f656n_wf_drz_wcs_p0001.fits",
+      "hubble_reg_hst_05773_03_wfpc2_f656n_wf_drz_wcs_p0007.fits",
+      "hubble_reg_hst_05237_02_wfpc2_f656n_wf_drz_wcs_p0009.fits",
+      "hubble_reg_hst_05773_03_wfpc2_f656n_wf_drz_wcs_p0002.fits",
+      "hubble_reg_hst_05773_03_wfpc2_f656n_wf_drz_wcs_p0014.fits",
+      "hubble_reg_hst_05773_03_wfpc2_f656n_wf_drz_wcs_p0011.fits",
+      "hubble_reg_hst_05773_03_wfpc2_f656n_wf_drz_wcs_p0006.fits",
+      "hubble_reg_hst_05237_02_wfpc2_f656n_wf_drz_wcs_p0013.fits",
+      "hubble_reg_hst_05237_02_wfpc2_f656n_wf_drz_wcs_p0007.fits"
+    ],
+    "val": [
+      "hubble_reg_hst_05773_03_wfpc2_f656n_wf_drz_wcs_p0005.fits",
+      "hubble_reg_hst_05237_02_wfpc2_f656n_wf_drz_wcs_p0011.fits",
+      "hubble_reg_hst_05237_02_wfpc2_f656n_wf_drz_wcs_p0000.fits",
+      "hubble_reg_hst_05773_03_wfpc2_f656n_wf_drz_wcs_p0010.fits"
+    ],
+    "test": [
+      "hubble_reg_hst_05773_03_wfpc2_f656n_wf_drz_wcs_p0012.fits",
+      "hubble_reg_hst_05773_03_wfpc2_f656n_wf_drz_wcs_p0001.fits",
+      "hubble_reg_hst_05237_02_wfpc2_f656n_wf_drz_wcs_p0010.fits",
+      "hubble_reg_hst_05237_02_wfpc2_f656n_wf_drz_wcs_p0006.fits",
+      "hubble_reg_hst_05773_03_wfpc2_f656n_wf_drz_wcs_p0013.fits",
+      "hubble_reg_hst_05237_02_wfpc2_f656n_wf_drz_wcs_p0014.fits"
+    ]
+  }
+}
