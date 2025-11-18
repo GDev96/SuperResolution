@@ -28,7 +28,9 @@ warnings.filterwarnings('ignore', category=fits.verify.VerifyWarning)
 # CONFIGURAZIONE PATH ASSOLUTI
 # ============================================================================
 # Definizione della radice del progetto
-PROJECT_ROOT = Path(r"F:\Super Revolt Gaia\SuperResolution")
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+PROJECT_ROOT = SCRIPT_DIR.parent
 
 # Percorsi assoluti derivati
 ROOT_DATA_DIR = PROJECT_ROOT / "data"
@@ -687,9 +689,9 @@ def main():
         logger.info(f"INIZIO TARGET: {BASE_DIR.name}")
 
         # Definizione percorsi per QUESTO target
-        INPUT_OSSERVATORIO = BASE_DIR / '1_originarie' / 'local_raw'
-        INPUT_LITH = BASE_DIR / '1_originarie' / 'img_lights'
-        OUTPUT_OSSERVATORIO_WCS = BASE_DIR / '2_wcs' / 'osservatorio'
+        INPUT_OSSERVATORIO = BASE_DIR / '1_origin' / 'local_raw'
+        INPUT_LITH = BASE_DIR / '1_origin' / 'img_lights'
+        OUTPUT_OSSERVATORIO_WCS = BASE_DIR / '2_wcs' / 'observatory'
         OUTPUT_LITH_WCS = BASE_DIR / '2_wcs' / 'hubble'
         INPUT_HUBBLE = OUTPUT_LITH_WCS
         INPUT_OBSERVATORY = OUTPUT_OSSERVATORIO_WCS
