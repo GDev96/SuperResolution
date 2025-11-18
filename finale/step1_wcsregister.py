@@ -117,8 +117,11 @@ def select_target_directory():
 # CONFIGURAZIONE GLOBALE
 # ============================================================================
 
-LOG_DIR_ROOT = Path(r'F:\Super Revolt Gaia\logs')
-NUM_THREADS = 7
+SCRIPT_DIR = Path(__file__).resolve().parent  # C:\...\SuperResolution\finale
+PROJECT_ROOT = SCRIPT_DIR.parent               # C:\...\SuperResolution
+LOG_DIR_ROOT = PROJECT_ROOT / 'logs'           # C:\...\SuperResolution\logs
+
+NUM_THREADS = 1
 REPROJECT_ORDER = 'bilinear'
 log_lock = threading.Lock()
 
@@ -132,6 +135,11 @@ def setup_logging():
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     log_filename = LOG_DIR_ROOT / f'unified_pipeline_{timestamp}.log'
 
+    # ✅ NUOVO: Rimuovi handler esistenti per evitare duplicati
+    root_logger = logging.getLogger()
+    if root_logger.hasHandlers():
+        root_logger.handlers.clear()
+
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(threadName)s - %(levelname)s - %(message)s',
@@ -140,7 +148,13 @@ def setup_logging():
             logging.StreamHandler()
         ]
     )
+    
     logger = logging.getLogger(__name__)
+    
+    # ✅ NUOVO: Log della configurazione path (debug)
+    logger.info("=" * 80)
+    logger.info(f"LOG FILE: {log_filename}")
+    logger.info("=" * 80)
     logger.info(f"Python: {sys.version}")
     logger.info(f"Numpy: {np.__version__}")
     logger.info(f"Astropy: {astropy.__version__}")
