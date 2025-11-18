@@ -14,6 +14,7 @@ from tqdm import tqdm
 import warnings
 import sys
 import subprocess
+from astropy.stats import sigma_clipped_stats
 
 warnings.filterwarnings('ignore')
 
@@ -216,13 +217,11 @@ def crop_all_images(INPUT_DIRS, OUTPUT_DIRS):
 
 def create_mosaic(INPUT_DIRS_CROPPED, MOSAIC_OUTPUT_FILE, MOSAIC_OUTPUT_DIR):
     print("\n" + "🖼️ "*35)
-    print("STEP 4: CREAZIONE MOSAICO DA IMMAGINI RITAGLIATE".center(70))
+    print("STEP 4: CREAZIONE MOSAICO (NORMALIZZAZIONE PERCENTILE)".center(70))
     print("🖼️ "*35)
     
     MOSAIC_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     INPUT_DIRS = [INPUT_DIRS_CROPPED['hubble'], INPUT_DIRS_CROPPED['observatory']]
-    print(f"\n📂 Input: {INPUT_DIRS_CROPPED['hubble'].parent}")
-    print(f"📂 Output: {MOSAIC_OUTPUT_FILE}")
     
     all_files = []
     for d in INPUT_DIRS:
@@ -231,57 +230,78 @@ def create_mosaic(INPUT_DIRS_CROPPED, MOSAIC_OUTPUT_FILE, MOSAIC_OUTPUT_DIR):
         all_files.extend(glob.glob(str(d / '*.fit')))
         
     if not all_files:
-        print(f"\n❌ ERRORE: Nessun file FITS ritagliato trovato.")
+        print(f"\n❌ ERRORE: Nessun file trovato.")
         return False
-    print(f"\n✅ Trovati {len(all_files)} file FITS da combinare.")
-    
+
+    # Lettura shape dal primo file
     try:
         with fits.open(all_files[0]) as hdul:
-            template_header = hdul[0].header
             shape = hdul[0].data.shape
+            if len(shape) > 2: shape = shape[-2:] # Prende solo Y, X
+            template_header = hdul[0].header.copy()
     except Exception as e:
-        print(f"\n❌ ERRORE: Impossibile leggere il primo file {all_files[0]}: {e}")
+        print(f"Errore lettura template: {e}")
         return False
-        
-    print(f"   Dimensioni mosaico: {shape[1]} x {shape[0]} pixel")
+
+    print(f"   Dimensioni: {shape}")
+
+    # Array per l'accumulo
+    sum_array = np.zeros(shape, dtype=np.float32)
+    count_array = np.zeros(shape, dtype=np.float32)
+
+    print("\n🔄 Combinazione con Normalizzazione (0.0 - 1.0)...")
     
-    total_flux = np.zeros(shape, dtype=np.float64)
-    n_pixels = np.zeros(shape, dtype=np.int32)
-    
-    print("\n🔄 Combinazione immagini in corso...")
-    for filepath in tqdm(all_files, desc="Combinazione", unit="file"):
+    for filepath in tqdm(all_files, desc="Mosaico", unit="file"):
         try:
             with fits.open(filepath) as hdul:
-                img_data = hdul[0].data
-                if img_data.shape != shape:
-                    print(f"\n⚠️  ATTENZIONE: {filepath} ha dimensioni errate. Saltato.")
-                    continue
-                valid_mask = ~np.isnan(img_data)
-                img_data_no_nan = np.nan_to_num(img_data, nan=0.0, copy=False)
-                total_flux += img_data_no_nan
-                n_pixels[valid_mask] += 1
+                data = hdul[0].data
+                if data is None: continue
+                if len(data.shape) > 2: data = data[0]
+                
+                # 1. Gestione NaN e Inf
+                mask_valid = np.isfinite(data)
+                if not np.any(mask_valid): continue # Salta immagini vuote
+                
+                # 2. Normalizzazione Robusta (Percentile Scaling)
+                # Calcoliamo il "nero" (1%) e il "bianco" (99%) ignorando i bordi neri (0 o NaN)
+                # Questo risolve M33 (valori negativi) e M1 (valori bassi)
+                lower_val = np.percentile(data[mask_valid], 1)
+                upper_val = np.percentile(data[mask_valid], 99)
+                
+                if upper_val == lower_val: continue # Evita divisione per zero
+                
+                # Scaliamo l'immagine per portarla tra 0.0 e 1.0
+                data_norm = (data - lower_val) / (upper_val - lower_val)
+                
+                # 3. Clip per pulizia
+                # Tutto ciò che è sotto il percentile 1 diventa 0, tutto sopra il 99 diventa 1
+                data_norm = np.clip(data_norm, 0.0, 1.0)
+                
+                # 4. Accumulo (dove i dati originali non erano NaN)
+                # Usiamo nan_to_num per sicurezza, ma la mask guida il conteggio
+                clean_data = np.nan_to_num(data_norm, nan=0.0)
+                
+                sum_array[mask_valid] += clean_data[mask_valid]
+                count_array[mask_valid] += 1.0
+                
         except Exception as e:
-            print(f"\n⚠️  ATTENZIONE: Errore nel leggere {filepath}: {e}. Saltato.")
-            
-    print("\n🧮 Calcolo della media finale...")
-    mosaic_data = np.full(shape, np.nan, dtype=np.float32)
-    valid_stack = n_pixels > 0
-    mosaic_data[valid_stack] = (total_flux[valid_stack] / n_pixels[valid_stack]).astype(np.float32)
-    
-    print(f"\n💾 Salvataggio mosaico in {MOSAIC_OUTPUT_FILE}...")
-    template_header['HISTORY'] = 'Mosaico creato da step2_croppedmosaico.py'
-    template_header['NCOMBINE'] = (len(all_files), 'Numero di file combinati')
-    
+            print(f"⚠️ Errore {Path(filepath).name}: {e}")
+
+    # Media finale
+    print("\n🧮 Calcolo media finale...")
+    with np.errstate(divide='ignore', invalid='ignore'):
+        mosaic = sum_array / count_array
+        mosaic[count_array == 0] = 0.0 # I pixel non coperti diventano neri
+
+    # Salvataggio
+    print(f"\n💾 Salvataggio: {MOSAIC_OUTPUT_FILE}")
     try:
-        fits.PrimaryHDU(data=mosaic_data, header=template_header).writeto(MOSAIC_OUTPUT_FILE, overwrite=True)
+        fits.PrimaryHDU(data=mosaic, header=template_header).writeto(MOSAIC_OUTPUT_FILE, overwrite=True)
+        return True
     except Exception as e:
-        print(f"\n❌ ERRORE: Impossibile salvare il file FITS finale: {e}")
+        print(f"❌ Errore salvataggio: {e}")
         return False
-
-    print(f"\n{'='*70}\n✅ MOSAICO COMPLETATO!\n{'='*70}")
-    print(f"   File salvato in: {MOSAIC_OUTPUT_FILE}")
-    return True
-
+    
 # ============================================================================
 # MENU DI PROSEGUIMENTO (MODIFICATO)
 # ============================================================================
@@ -289,7 +309,8 @@ def create_mosaic(INPUT_DIRS_CROPPED, MOSAIC_OUTPUT_FILE, MOSAIC_OUTPUT_DIR):
 def ask_continue_to_mosaic():
     """Chiede all'utente se vuole proseguire con la creazione del mosaico."""
     print("\n" + "="*70); print("🎯 RITAGLIO COMPLETATO!"); print("="*70)
-    print("\n📋 OPZIONI:\n   1️⃣  Continua con creazione Mosaico\n   2️⃣  Salta Mosaico (passa a Step 5+6)")
+    # CORREZIONE: Reso più chiaro il messaggio informativo
+    print("\n📋 Il ritaglio è completo. Il passo successivo è la creazione del Mosaico (Stacking).") 
     while True:
         print("\n" + "─"*70)
         choice = input("👉 Vuoi creare il Mosaico ora? [S/n, default=S]: ").strip().lower()
