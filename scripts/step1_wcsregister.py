@@ -1,32 +1,55 @@
 """
-PIPELINE UNIFICATO: PLATE SOLVING (SIRIL) + WCS EXTRACTION + REGISTRAZIONE GLOBALE
-
-CORREZIONE CHIAVE:
-- Eliminata la dipendenza da Astrometry.net API.
-- Plate Solving per file locali (`local_raw`) eseguito tramite Siril CLI (richiede Siril 1.4.0+).
-- Mantenuto il FIX CRITICO per il calcolo del WCS comune (margine 15%) che risolveva
-  l'errore "Nessun pixel dopo reproiezione".
+PIPELINE COMPLETO: CONVERSIONE WCS + REGISTRAZIONE
+Combina Step 1 (Conversione WCS) e Step 2 (Registrazione) in un unico script.
+Gli output dei due step rimangono separati e distinti.
+Tutti i metodi sono mantenuti ESATTAMENTE come negli script originali.
+MODIFICATO: Integra gestione path dinamici e menu selezione da v1.
 """
 
 import os
 import sys
+import glob
 import time
 import logging
-import shutil
 from datetime import datetime
 import numpy as np
 import astropy
 from astropy.io import fits
 from astropy.wcs import WCS
-from astropy.coordinates import Angle
+from astropy.coordinates import SkyCoord
 import astropy.units as u
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
 import threading
 import warnings
+from pathlib import Path
 import subprocess
 
+warnings.filterwarnings('ignore', category=fits.verify.VerifyWarning)
+
+# ============================================================================
+# CONFIGURAZIONE PATH DINAMICI (UNIVERSALI)
+# ============================================================================
+# 1. Ottiene la directory corrente dello script (es. .../SuperResolution/scripts)
+CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
+
+# 2. Risale alla root del progetto (es. .../SuperResolution)
+#    Assumiamo che lo script sia dentro "scripts/", quindi il genitore è la root.
+PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
+
+# 3. Dove cercare i dati (M33, ecc.)
+ROOT_DATA_DIR = PROJECT_ROOT / "data"
+
+# 4. Dove salvare i log
+LOG_DIR_ROOT = ROOT_DATA_DIR / "logs"
+
+# 5. Cartella script (uguale alla directory corrente)
+SCRIPTS_DIR = CURRENT_SCRIPT_DIR
+
+print(f"📂 Project Root rilevata: {PROJECT_ROOT}")
+print(f"📂 Data Dir rilevata:    {ROOT_DATA_DIR}")
+# ============================================================================
+# Prova a importare reproject
 try:
     from reproject import reproject_interp
     REPROJECT_AVAILABLE = True
@@ -34,853 +57,1139 @@ except ImportError:
     REPROJECT_AVAILABLE = False
     print("="*70)
     print("ERRORE: Libreria 'reproject' non trovata.")
+    print("Questa libreria è fondamentale per lo Step 2.")
     print("Installa con: pip install reproject")
     print("="*70)
 
-warnings.filterwarnings('ignore', category=fits.verify.VerifyWarning)
+# Parametri Step 2
+NUM_THREADS = 7
+REPROJECT_ORDER = 'bilinear'
 
-# ============================================================================
-# CONFIGURAZIONE GLOBALE & SIRIL
-# ============================================================================
-NUM_THREADS = 8 
-REPROJECT_ORDER = 'bicubic'
-# Se Siril non è nel tuo PATH, imposta il percorso completo qui
-# Esempio Windows: SIRIL_EXEC_PATH = "C:\\Program Files\\Siril\\siril.exe"
-SIRIL_EXEC_PATH = "C:\\Program Files\\Siril\\bin\\siril.exe" 
-SIRIL_MIN_VERSION = "1.4.0" # Richiesto per il comando 'wcs' avanzato
+# Lock per logging thread-safe
 log_lock = threading.Lock()
 
-# PARAMETRI DI VALIDAZIONE (Mantenuti)
-PERCENTILE_LOW = 0.5   
-PERCENTILE_HIGH = 99.5 
-MIN_UNIQUE_VALUES_ORIGINAL = 50   
-MIN_UNIQUE_VALUES_NORMALIZED = 30  
-MIN_RANGE_THRESHOLD = 1e-10  
-
 # ============================================================================
-# CONFIGURAZIONE PATH
+# FUNZIONI MENU E SELEZIONE (DA V1)
 # ============================================================================
-SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent
-ROOT_DATA_DIR = PROJECT_ROOT / "data"
-LOG_DIR_ROOT = PROJECT_ROOT / "logs"
-SCRIPTS_DIR = PROJECT_ROOT / "finale"
-
-# ============================================================================
-# SETUP LOGGING & SELEZIONE TARGET (Mantenute)
-# ============================================================================
-
-def setup_logging():
-    """Configura logging per pipeline."""
-    os.makedirs(LOG_DIR_ROOT, exist_ok=True)
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_filename = LOG_DIR_ROOT / f'pipeline_siril_{timestamp}.log'
-
-    root_logger = logging.getLogger()
-    if root_logger.hasHandlers():
-        root_logger.handlers.clear()
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_filename, encoding='utf-8'),
-            logging.StreamHandler()
-        ]
-    )
-    
-    logger = logging.getLogger(__name__)
-    logger.info("="*80)
-    logger.info(f"MODALITÀ: Plate Solving Siril ({SIRIL_EXEC_PATH}) + WCS Extraction")
-    logger.info(f"LOG FILE: {log_filename}")
-    logger.info(f"Astropy: {astropy.__version__}")
-    logger.info(f"Threads: {NUM_THREADS}")
-    logger.info("="*80)
-    return logger
 
 def select_target_directory():
-    # ... (Funzione identica a quella precedente per selezionare la directory) ...
+    """
+    Mostra un menu per selezionare una o TUTTE le cartelle target.
+    """
     print("\n" + "📂"*35)
     print("SELEZIONE CARTELLA TARGET".center(70))
     print("📂"*35)
     print(f"\nScansione sottocartelle in: {ROOT_DATA_DIR}")
 
-    subdirs_with_data = []
-    
     try:
-        for d in ROOT_DATA_DIR.iterdir():
-            if d.is_dir():
-                fits_files_local = list((d / '1_origin' / 'local_raw').glob('**/*.fit*'))
-                fits_files_lith = list((d / '1_origin' / 'img_lights').glob('**/*.fit*'))
-                
-                summary = []
-                if fits_files_lith:
-                     summary.append(f"{len(fits_files_lith)} file FITS in img_lights (HST)")
-                if fits_files_local:
-                    summary.append(f"{len(fits_files_local)} file FITS in local_raw (Local)")
-                
-                if summary:
-                    subdirs_with_data.append({'path': d, 'summary': ", ".join(summary)})
-                    
+        # Filtra solo le cartelle che contengono dati (es. M33) ed esclude 'logs' e 'splits'
+        subdirs = [d for d in ROOT_DATA_DIR.iterdir() if d.is_dir() and d.name not in ['splits', 'logs']]
     except Exception as e:
-        print(f"\n❌ ERRORE: Impossibile leggere {ROOT_DATA_DIR}")
+        print(f"\n❌ ERRORE: Impossibile leggere la cartella {ROOT_DATA_DIR}")
         print(f"   Dettagli: {e}")
+        if not ROOT_DATA_DIR.exists():
+             print(f"   ⚠️ La cartella non esiste. Creala e inserisci le cartelle target (es. M33).")
         return []
 
-    if not subdirs_with_data:
-        print(f"\n❌ Nessuna sottocartella contenente dati FITS trovata.")
+    if not subdirs:
+        print(f"\n❌ ERRORE: Nessuna sottocartella trovata in {ROOT_DATA_DIR}")
+        print("   Assicurati di avere la struttura: data/M33/1_originarie/...")
         return []
 
-    print("\nTarget disponibili:")
-    print(f"   0: ✨ Processa TUTTI i {len(subdirs_with_data)} target")
+    print("\nCartelle target disponibili:")
+    print(f"   0: ✨ Processa TUTTI i {len(subdirs)} target")
     print("   " + "─"*30)
-    for i, item in enumerate(subdirs_with_data):
-        print(f"   {i+1}: {item['path'].name.ljust(15)} ({item['summary']})")
+    for i, dir_path in enumerate(subdirs):
+        print(f"   {i+1}: {dir_path.name}")
 
     while True:
         print("\n" + "─"*70)
         try:
-            choice_str = input(f"👉 Seleziona (0-{len(subdirs_with_data)}) o 'q': ").strip()
+            choice_str = input(f"👉 Seleziona un numero (0-{len(subdirs)}) o 'q' per uscire: ").strip()
+
             if choice_str.lower() == 'q':
-                return []
+                print("👋 Uscita.")
+                return [] 
+
             choice = int(choice_str)
+
             if choice == 0:
-                return [item['path'] for item in subdirs_with_data]
-            if 0 < choice <= len(subdirs_with_data):
-                return [subdirs_with_data[choice-1]['path']]
-            print(f"❌ Numero non valido")
-        except ValueError:
-            print("❌ Input non valido")
-
-# ============================================================================
-# SIRIL PLATE SOLVING FUNCTION (SOSTITUZIONE API)
-# ============================================================================
-
-def solve_file_with_siril(input_file, output_dir, logger):
-    """
-    Esegue il plate solving su un file FITS usando Siril CLI.
-    """
-    filename = input_file.name
-    output_file = output_dir / f"{input_file.stem}_solved.fits"
-    
-    # 1. Check se già risolto
-    if output_file.exists():
-        try:
-            with fits.open(output_file) as hdul:
-                if WCS(hdul[0].header).has_celestial:
-                    return {'status': 'solved', 'file': filename, 'output': output_file}
-        except:
-            pass # Riprova se file corrotto
+                print(f"\n✅ Selezionati TUTTI i {len(subdirs)} target.")
+                return subdirs 
             
-    # 2. Copia il file originale nella cartella di output
-    try:
-        shutil.copy2(input_file, output_file)
-    except Exception as e:
-        with log_lock: logger.error(f"❌ {filename}: Errore copia file: {e}")
-        return {'status': 'error', 'file': filename, 'reason': f"Errore copia file: {e}"}
-
-    # 3. Crea uno script temporaneo per Siril
-    temp_script_path = output_dir / f"siril_solve_{input_file.stem}.txt"
-    # Carica la copia, esegui il plate solving WCS, e sovrascrivi
-    script_content = f"""
-    requires {SIRIL_MIN_VERSION}
-    # Imposta la directory di lavoro su quella di output
-    setproc dir {output_dir.resolve()}
-    
-    # Carica il file copiato, lo risolve, e lo salva con WCS
-    load {output_file.name} 
-    wcs # Comando di plate solving di Siril (richiede connessione internet la prima volta per indici)
-    save {output_file.name} 
-    """
-    
-    with open(temp_script_path, 'w') as f:
-        f.write(script_content)
-        
-    # 4. Esegui Siril
-    try:
-        command = [
-            SIRIL_EXEC_PATH,
-            "-s", str(temp_script_path.resolve()),
-        ]
-        
-        with log_lock: logger.info(f"⚙️ Esecuzione Siril su {filename}...")
-
-        # Esegui Siril
-        result = subprocess.run(
-            command, 
-            check=False, 
-            capture_output=True, 
-            text=True, 
-            encoding='utf-8',  # FIX: Forza UTF-8 invece di CP1252
-            errors='replace',   # Ignora caratteri invalidi
-            timeout=300
-        )        
-
-        if result.returncode != 0:
-            with log_lock:
-                logger.error(f"❌ {filename}: Siril fallito (Codice {result.returncode}). Controlla log Siril: {result.stderr.strip()}")
-            return {'status': 'error', 'file': filename, 'reason': f"Siril failed: {result.stderr.strip()}"}
-
-        # 5. Check WCS
-        with fits.open(output_file) as hdul:
-            if WCS(hdul[0].header).has_celestial:
-                with log_lock: logger.info(f"✅ {filename}: Plate Solved con Siril.")
-                return {'status': 'success', 'file': filename, 'output': output_file}
+            choice_idx = choice - 1
+            if 0 <= choice_idx < len(subdirs):
+                selected_dir = subdirs[choice_idx]
+                print(f"\n✅ Cartella selezionata: {selected_dir.name}")
+                print(f"   Percorso completo: {selected_dir}")
+                return [selected_dir]
             else:
-                with log_lock: logger.error(f"❌ {filename}: Siril eseguito ma WCS non trovato nell'header.")
-                return {'status': 'error', 'file': filename, 'reason': 'Siril executed but WCS not found.'}
+                print(f"❌ Scelta non valida. Inserisci un numero tra 0 e {len(subdirs)}.")
+        except ValueError:
+            print("❌ Input non valido. Inserisci un numero.")
+        except Exception as e:
+            print(f"❌ Errore: {e}")
+            return []
 
-    except FileNotFoundError:
-        with log_lock: logger.error(f"❌ {filename}: Eseguibile Siril non trovato. Controlla il path: {SIRIL_EXEC_PATH}")
-        return {'status': 'error', 'file': filename, 'reason': f"Eseguibile Siril non trovato: {SIRIL_EXEC_PATH}"}
+def ask_continue_to_cropping():
+    """Chiede all'utente se vuole proseguire con Step 3+4 (Ritaglio e Mosaico)."""
+    print("\n" + "="*70)
+    print("🎯 STEP 1 E 2 (WCS e Registrazione) COMPLETATI!")
+    print("="*70)
+    print("\n📋 OPZIONI:")
+    print("   1️⃣  Continua con Step 3+4 (Ritaglio e Mosaico)")
+    print("   2️⃣  Termina qui")
+    while True:
+        print("\n" + "─"*70)
+        choice = input("👉 Vuoi continuare con 'step2_croppedmosaico.py'? [S/n, default=S]: ").strip().lower()
+        if choice in ('', 's', 'si', 'y', 'yes'):
+            print("\n✅ Avvio Step 3+4 (step2_croppedmosaico.py)...")
+            return True
+        elif choice in ('n', 'no'):
+            print("\n✅ Pipeline interrotta")
+            print("   Per eseguire Step 3+4 in seguito, esegui 'step2_croppedmosaico.py'")
+            return False
+        else:
+            print("❌ Scelta non valida. Inserisci S per Sì o N per No.")
+
+# ============================================================================
+# SETUP LOGGING
+# ============================================================================
+
+def setup_logging():
+    """Configura logging per l'intera pipeline."""
+    os.makedirs(LOG_DIR_ROOT, exist_ok=True)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_filename = LOG_DIR_ROOT / f'unified_pipeline_{timestamp}.log'
+    
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(threadName)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_filename, encoding='utf-8'),
+            logging.StreamHandler()
+        ]
+    )
+    logger = logging.getLogger(__name__)
+    logger.info(f"Python: {sys.version}")
+    logger.info(f"Numpy: {np.__version__}")
+    logger.info(f"Astropy: {astropy.__version__}")
+    if REPROJECT_AVAILABLE:
+        logger.info(f"Reproject: (importata con successo)")
+    logger.info(f"Threads: {NUM_THREADS}")
+    logger.info(f"Reprojection Order: {REPROJECT_ORDER}")
+    logger.info("MODALITÀ: Risoluzione Nativa (ogni immagine mantiene la sua risoluzione)")
+    
+    return logger
+
+# ============================================================================
+# STEP 1: FUNZIONI CONVERSIONE WCS (ESATTE DALL'ORIGINALE)
+# ============================================================================
+
+def parse_coordinates(ra_str, dec_str):
+    """
+    Converte coordinate da formato sessagesimale a decimale.
+    
+    Args:
+        ra_str: es. '1 34 01' (ore minuti secondi)
+        dec_str: es. '30 41 00' (gradi minuti secondi)
+    
+    Returns:
+        (ra_deg, dec_deg) in gradi decimali
+    """
+    try:
+        # Rimuovi spazi extra
+        ra_str = ra_str.strip()
+        dec_str = dec_str.strip()
+        
+        # Usa SkyCoord di astropy per parsing robusto
+        coord_str = f"{ra_str} {dec_str}"
+        coord = SkyCoord(coord_str, unit=(u.hourangle, u.deg))
+        
+        return coord.ra.degree, coord.dec.degree
         
     except Exception as e:
-        with log_lock: logger.error(f"❌ {filename}: Errore Siril: {e}")
-        return {'status': 'error', 'file': filename, 'reason': str(e)}
-        
-    finally:
-        # Cleanup temporary script
-        if temp_script_path.exists():
-            os.remove(temp_script_path)
+        # Fallback: parsing manuale
+        try:
+            ra_parts = ra_str.split()
+            dec_parts = dec_str.split()
+            
+            # RA: ore, minuti, secondi -> gradi
+            h, m, s = float(ra_parts[0]), float(ra_parts[1]), float(ra_parts[2])
+            ra_deg = (h + m/60.0 + s/3600.0) * 15.0  # * 15 per convertire ore in gradi
+            
+            # DEC: gradi, minuti, secondi -> gradi
+            d, m, s = float(dec_parts[0]), float(dec_parts[1]), float(dec_parts[2])
+            sign = 1 if d >= 0 else -1
+            dec_deg = d + sign * (m/60.0 + s/3600.0)
+            
+            return ra_deg, dec_deg
+            
+        except Exception as e2:
+            raise ValueError(f"Impossibile parsare coordinate: RA='{ra_str}', DEC='{dec_str}': {e2}")
 
 
-def prepare_images_with_platesolving(logger, input_dir_obs, output_dir_prep, input_dir_lith, output_dir_lith_prep):
+def calculate_pixel_scale(header):
     """
-    Gestisce sia i file locali (con plate solving SIRIL) che i file HST/LITH (con estrazione WCS).
+    Calcola pixel scale da informazioni nel header.
+    
+    Args:
+        header: Header FITS
+    
+    Returns:
+        pixel_scale in gradi/pixel
     """
-    os.makedirs(output_dir_prep, exist_ok=True)
-    os.makedirs(output_dir_lith_prep, exist_ok=True)
+    # Estrai parametri
+    xpixsz = header.get('XPIXSZ', None)  # micron
+    focal = header.get('FOCALLEN', header.get('FOCAL', None))  # mm
+    xbin = header.get('XBINNING', 1)
+    
+    if xpixsz and focal:
+        # Formula: pixel_scale (arcsec/px) = 206.265 * pixel_size (mm) / focal_length (mm)
+        pixel_size_mm = (xpixsz * xbin) / 1000.0  # converti micron -> mm e applica binning
+        pixel_scale_arcsec = 206.265 * pixel_size_mm / focal
+        pixel_scale_deg = pixel_scale_arcsec / 3600.0
+        return pixel_scale_deg
+    
+    # Fallback: stima per setup comune
+    # Tipico per piccoli telescopi: ~1-2 arcsec/pixel
+    return 1.5 / 3600.0  # 1.5 arcsec/pixel
 
-    # 1. Processing HST/LITH files (WCS Extraction - NO PLATE SOLVING)
-    print("\n🛰️  LITH/HST (Img_lights) - Estrazione WCS esistente...")
-    prep_lith, fail_lith, _ = process_lith_folder(input_dir_lith, output_dir_lith_prep, logger)
-    print(f"   ✓ Preparati: {prep_lith}, ✗ Falliti: {fail_lith}")
 
-    # 2. Processing Local files (Plate Solving SIRIL)
-    local_fits_files = list(Path(input_dir_obs).glob('**/*.fit')) + list(Path(input_dir_obs).glob('**/*.fits'))
-    if not local_fits_files:
-        print("\n📡 OSSERVATORIO (Local_raw) - Nessun file trovato per Plate Solving.")
-        total_prepared_paths = list(output_dir_lith_prep.glob('*_wcs.fits'))
-        return total_prepared_paths, []
+def create_wcs_from_header(header, data_shape):
+    """
+    Crea WCS completo da informazioni nel header.
     
-    print("\n📡 OSSERVATORIO (Local_raw) - Plate Solving con Siril CLI...")
+    Args:
+        header: Header FITS originale
+        data_shape: Dimensioni dell'immagine (height, width)
     
-    solved_files_info = []
-    
-    with ThreadPoolExecutor(max_workers=NUM_THREADS) as executor:
-        futures = {
-            executor.submit(solve_file_with_siril, input_file, output_dir_prep, logger): input_file.name
-            for input_file in local_fits_files
-        }
+    Returns:
+        WCS object, o None se fallisce
+    """
+    try:
+        # Estrai coordinate centro
+        objctra = header.get('OBJCTRA', None)
+        objctdec = header.get('OBJCTDEC', None)
         
-        with tqdm(total=len(local_fits_files), desc="   Plate Solving (Siril)", unit="file") as pbar:
-            for future in as_completed(futures):
-                result = future.result()
-                if result['status'] in ['success', 'solved']:
-                    solved_files_info.append(result['output'])
-                pbar.update(1)
-                
+        if not objctra or not objctdec:
+            return None
+        
+        # Converti coordinate
+        ra_deg, dec_deg = parse_coordinates(objctra, objctdec)
+        
+        # Calcola pixel scale
+        pixel_scale = calculate_pixel_scale(header)
+        
+        # Crea WCS
+        wcs = WCS(naxis=2)
+        
+        # Centro immagine
+        height, width = data_shape
+        wcs.wcs.crpix = [width / 2.0, height / 2.0]
+        
+        # Coordinate centro
+        wcs.wcs.crval = [ra_deg, dec_deg]
+        
+        # Pixel scale (negativo per RA per convenzione astronomica)
+        wcs.wcs.cdelt = [-pixel_scale, pixel_scale]
+        
+        # Tipo proiezione (TAN = tangente, standard per campi piccoli)
+        wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+        
+        # Sistema di riferimento
+        wcs.wcs.radesys = 'ICRS'
+        wcs.wcs.equinox = 2000.0
+        
+        return wcs
+        
+    except Exception as e:
+        return None
+
+
+def add_wcs_to_file(input_file, output_file, logger):
+    """
+    Aggiunge WCS a un file FITS che ha OBJCTRA/OBJCTDEC.
     
-    # Unisci tutti i file preparati (solved + lith/hst)
-    total_prepared_paths = solved_files_info + list(output_dir_lith_prep.glob('*_wcs.fits'))
+    Args:
+        input_file: File input
+        output_file: File output con WCS
+        logger: Logger
+    
+    Returns:
+        True se successo, False altrimenti
+    """
+    try:
+        filename = os.path.basename(input_file)
+        
+        with fits.open(input_file, mode='readonly') as hdul:
+            data = hdul[0].data
+            header = hdul[0].header.copy()
+            
+            if data is None:
+                logger.warning(f"Nessun dato in {filename}")
+                return False
+            
+            # Verifica se ha già WCS valido
+            existing_wcs = WCS(header)
+            if existing_wcs.has_celestial:
+                logger.info(f"✓ {filename}: WCS già presente")
+                # Copia comunque il file
+                hdul.writeto(output_file, overwrite=True)
+                return True
+            
+            # Crea WCS da OBJCTRA/OBJCTDEC
+            wcs = create_wcs_from_header(header, data.shape)
+            
+            if wcs is None:
+                logger.warning(f"Impossibile creare WCS per {filename}")
+                return False
+            
+            # Aggiungi WCS all'header
+            wcs_header = wcs.to_header()
+            
+            # Mantieni campi importanti originali
+            important_keys = ['SIMPLE', 'BITPIX', 'NAXIS', 'NAXIS1', 'NAXIS2',
+                            'BZERO', 'BSCALE', 'DATE-OBS', 'EXPTIME', 'FILTER',
+                            'INSTRUME', 'TELESCOP', 'XBINNING', 'YBINNING',
+                            'XPIXSZ', 'YPIXSZ', 'GAIN', 'CCD-TEMP', 'FOCALLEN']
+            
+            # Crea nuovo header combinato
+            new_header = fits.Header()
+            
+            # Prima i campi base
+            for key in important_keys:
+                if key in header:
+                    new_header[key] = header[key]
+            
+            # Poi il WCS
+            new_header.update(wcs_header)
+            
+            # Aggiungi metadati preparazione
+            new_header['WCSADDED'] = True
+            new_header['WCSSRC'] = 'OBJCTRA/OBJCTDEC conversion'
+            new_header['WCSDATE'] = datetime.now().isoformat()
+            
+            # Salva
+            primary_hdu = fits.PrimaryHDU(data=data, header=new_header)
+            primary_hdu.writeto(output_file, overwrite=True, output_verify='silentfix')
+            
+            logger.info(f"✓ {filename}: WCS aggiunto")
+            return True
+            
+    except Exception as e:
+        logger.error(f"Errore {os.path.basename(input_file)}: {e}")
+        return False
 
-    print(f"   ✓ Risolti: {len(solved_files_info)}/{len(local_fits_files)} file locali.")
-    print(f"   ✓ Totale file WCS pronti: {len(total_prepared_paths)}.")
-
-    return total_prepared_paths, []
-
-# ============================================================================
-# UTILITY WCS & REGISTRAZIONE (Mantenute, vedi script precedente per il corpo completo)
-# ============================================================================
-def parse_coordinates(ra_str, dec_str):
-    try: ra_deg = Angle(ra_str, unit=u.hour).degree
-    except:
-        try: ra_deg = Angle(ra_str, unit=u.deg).degree
-        except: ra_deg = float(ra_str)
-    try: dec_deg = Angle(dec_str, unit=u.deg).degree
-    except: dec_deg = float(dec_str)
-    return ra_deg, dec_deg
 
 def extract_lith_data(filename, logger):
-    """Estrae dati e WCS da file LITH/HST (Multi-HDU)."""
+    """
+    Estrae dati e WCS da file LITH/HST.
+    Questi file hanno già WCS valido, basta estrarlo.
+    
+    Args:
+        filename: Path al file FITS
+        logger: Logger
+    
+    Returns:
+        (data, header, info_dict) o (None, None, None) se fallisce
+    """
     try:
         with fits.open(filename) as hdul:
+            # Cerca primo HDU con dati scientifici e WCS
+            sci_hdu = None
             for hdu in hdul:
                 if hdu.data is not None and len(hdu.data.shape) >= 2:
                     try:
                         wcs = WCS(hdu.header)
                         if wcs.has_celestial:
-                            data = hdu.data[0] if len(hdu.data.shape) == 3 else hdu.data
-                            header = hdu.header.copy()
-                            ra, dec = wcs.wcs.crval
-                            try:
-                                cd = wcs.wcs.cd
-                                pixel_scale = np.sqrt(cd[0,0]**2 + cd[0,1]**2) * 3600
-                            except: pixel_scale = 0.04
-                            return data, header, {'shape': data.shape, 'ra': ra, 'dec': dec, 'pixel_scale': pixel_scale}
-                    except: continue
-        return None, None, None
+                            sci_hdu = hdu
+                            break
+                    except:
+                        continue
+            
+            if sci_hdu is None:
+                logger.warning(f"Nessun HDU con WCS in {os.path.basename(filename)}")
+                return None, None, None
+            
+            sci_data = sci_hdu.data
+            sci_header = sci_hdu.header.copy()
+            wcs = WCS(sci_header)
+            
+            # Se 3D, prendi primo canale
+            if len(sci_data.shape) == 3:
+                sci_data = sci_data[0]
+            
+            if not wcs.has_celestial:
+                logger.warning(f"WCS non valido in {os.path.basename(filename)}")
+                return None, None, None
+            
+            shape = sci_data.shape
+            ra, dec = wcs.wcs.crval
+            
+            try:
+                cd = wcs.wcs.cd
+                pixel_scale = np.sqrt(cd[0,0]**2 + cd[0,1]**2) * 3600
+            except:
+                pixel_scale = 0.04
+            
+            info = {
+                'shape': shape,
+                'ra': ra,
+                'dec': dec,
+                'pixel_scale': pixel_scale
+            }
+            
+            logger.info(f"✓ {os.path.basename(filename)}: {shape[1]}x{shape[0]}px, RA={ra:.4f}°, DEC={dec:.4f}°")
+            
+            return sci_data, sci_header, info
+            
     except Exception as e:
-        logger.error(f"Errore {os.path.basename(filename)}: {e}")
+        logger.error(f"✗ {os.path.basename(filename)}: {e}")
         return None, None, None
+
+
+def process_osservatorio_folder(input_dir, output_dir, logger):
+    """Processa osservatorio convertendo coordinate in WCS."""
+    # Modificato per cercare ricorsivamente in tutte le sottocartelle
+    fits_files = list(Path(input_dir).glob('**/*.fit')) + list(Path(input_dir).glob('**/*.fits'))
+    
+    if not fits_files:
+        logger.warning(f"Nessun file in {input_dir}")
+        return 0, 0, None
+    
+    logger.info(f"Trovati {len(fits_files)} file osservatorio")
+    
+    prepared_count = 0
+    failed_count = 0
+    ra_list = []
+    dec_list = []
+    scale_list = []
+    
+    with tqdm(total=len(fits_files), desc="  Osservatorio", unit="file") as pbar:
+        for input_file in fits_files:
+            basename = input_file.name
+            name, ext = os.path.splitext(basename)
+            output_file = output_dir / f"{name}_wcs.fits"
+            
+            success = add_wcs_to_file(input_file, output_file, logger)
+            
+            if success:
+                try:
+                    with fits.open(output_file) as hdul:
+                        wcs = WCS(hdul[0].header)
+                        if wcs.has_celestial:
+                            ra, dec = wcs.wcs.crval
+                            pixel_scale = abs(wcs.wcs.cdelt[0]) * 3600
+                            ra_list.append(ra)
+                            dec_list.append(dec)
+                            scale_list.append(pixel_scale)
+                    prepared_count += 1
+                except:
+                    failed_count += 1
+            else:
+                failed_count += 1
+            
+            pbar.update(1)
+    
+    stats = None
+    if ra_list:
+        stats = {
+            'ra_range': (min(ra_list), max(ra_list)),
+            'dec_range': (min(dec_list), max(dec_list)),
+            'avg_scale': np.mean(scale_list)
+        }
+    
+    return prepared_count, failed_count, stats
+
 
 def process_lith_folder(input_dir, output_dir, logger):
-    """Processa file LITH/HST (Estrazione WCS)."""
+    """Processa LITH/HST."""
+    # Modificato per cercare ricorsivamente in tutte le sottocartelle
     fits_files = list(Path(input_dir).glob('**/*.fit')) + list(Path(input_dir).glob('**/*.fits'))
-    if not fits_files: return 0, 0, None
-    os.makedirs(output_dir, exist_ok=True)
-    prepared_count = 0; failed_count = 0
-    with tqdm(total=len(fits_files), desc="   LITH/HST", unit="file") as pbar:
+    
+    if not fits_files:
+        return 0, 0, None
+    
+    logger.info(f"Trovati {len(fits_files)} file LITH")
+    
+    prepared_count = 0
+    failed_count = 0
+    ra_list = []
+    dec_list = []
+    scale_list = []
+    
+    with tqdm(total=len(fits_files), desc="  LITH", unit="file") as pbar:
         for input_file in fits_files:
             data, header, info = extract_lith_data(input_file, logger)
+            
             if data is not None:
-                name = input_file.stem
+                basename = input_file.name
+                name, ext = os.path.splitext(basename)
                 output_file = output_dir / f"{name}_wcs.fits"
+                
                 try:
-                    hdu = fits.PrimaryHDU(data=data, header=header)
-                    hdu.header['ORIGINAL'] = input_file.name
-                    hdu.header['PREPDATE'] = datetime.now().isoformat()
-                    hdu.writeto(output_file, overwrite=True, output_verify='silentfix')
+                    primary_hdu = fits.PrimaryHDU(data=data, header=header)
+                    primary_hdu.header['ORIGINAL'] = basename
+                    primary_hdu.header['PREPDATE'] = datetime.now().isoformat()
+                    primary_hdu.header['SOURCE'] = 'lith'
+                    
+                    primary_hdu.writeto(output_file, overwrite=True, output_verify='silentfix')
+                    
                     prepared_count += 1
-                except: failed_count += 1
-            else: failed_count += 1
+                    ra_list.append(info['ra'])
+                    dec_list.append(info['dec'])
+                    scale_list.append(info['pixel_scale'])
+                except Exception as e:
+                    logger.error(f"Errore {basename}: {e}")
+                    failed_count += 1
+            else:
+                failed_count += 1
+            
             pbar.update(1)
-    return prepared_count, failed_count, None
+    
+    stats = None
+    if ra_list:
+        stats = {
+            'ra_range': (min(ra_list), max(ra_list)),
+            'dec_range': (min(dec_list), max(dec_list)),
+            'avg_scale': np.mean(scale_list)
+        }
+    
+    return prepared_count, failed_count, stats
 
-def extract_wcs_info_safe(filepath, logger):
+# ============================================================================
+# STEP 2: FUNZIONI REGISTRAZIONE (ESATTE DALL'ORIGINALE)
+# ============================================================================
+
+def extract_wcs_info(filepath, logger):
+    """Estrae info WCS da file FITS."""
     try:
         with fits.open(filepath) as hdul:
+            # Trova il primo HDU con dati e WCS valido
+            data_hdu = None
+            hdu_idx = 0
+            
             for i, hdu in enumerate(hdul):
                 if hdu.data is not None and len(hdu.data.shape) >= 2:
                     try:
                         wcs = WCS(hdu.header)
                         if wcs.has_celestial:
-                            data = hdu.data[0] if len(hdu.data.shape) == 3 else hdu.data
-                            ny, nx = data.shape
-                            world = wcs.wcs_pix2world([[nx/2, ny/2]], 1)
-                            center_ra = float(world[0][0])
-                            center_dec = float(world[0][1])
-                            
-                            if hasattr(wcs.wcs, 'cd') and wcs.wcs.cd is not None:
-                                cd = wcs.wcs.cd
-                                pixel_scale_deg = np.sqrt(cd[0,0]**2 + cd[0,1]**2)
-                            else: pixel_scale_deg = abs(wcs.wcs.cdelt[0])
-                            pixel_scale_arcsec = pixel_scale_deg * 3600.0
-                            
-                            return {'file': filepath, 'hdu_index': i, 'wcs': wcs, 'shape': data.shape, 'center_ra': center_ra, 'center_dec': center_dec, 'pixel_scale': pixel_scale_arcsec}
-                    except: continue
-        return None
+                            data_hdu = hdu
+                            hdu_idx = i
+                            break
+                    except:
+                        continue
+            
+            if data_hdu is None:
+                with log_lock:
+                    logger.warning(f"Nessun HDU con WCS valido trovato in {os.path.basename(filepath)}")
+                return None
+            
+            wcs = WCS(data_hdu.header)
+
+            # Se 3D, usa primo canale
+            if len(data_hdu.data.shape) == 3:
+                data = data_hdu.data[0]
+            else:
+                data = data_hdu.data
+            
+            ny, nx = data.shape
+            center = wcs.pixel_to_world(nx/2, ny/2)
+            
+            # Calcola pixel scale NATIVO dell'immagine
+            try:
+                if hasattr(wcs.wcs, 'cd') and wcs.wcs.cd is not None:
+                    cd = wcs.wcs.cd
+                    pixel_scale_deg = np.sqrt(cd[0,0]**2 + cd[0,1]**2)
+                else:
+                    pixel_scale_deg = abs(wcs.wcs.cdelt[0])
+                pixel_scale_arcsec = pixel_scale_deg * 3600.0
+            except:
+                pixel_scale_arcsec = 0.0
+            
+            return {
+                'file': filepath,
+                'hdu_index': hdu_idx,
+                'wcs': wcs,
+                'shape': data.shape,
+                'center_ra': center.ra.deg,
+                'center_dec': center.dec.deg,
+                'pixel_scale': pixel_scale_arcsec,  # Risoluzione NATIVA
+            }
+            
     except Exception as e:
-        with log_lock: logger.error(f"Errore WCS {os.path.basename(filepath)}: {e}")
+        with log_lock:
+            logger.error(f"Errore WCS {os.path.basename(filepath)}: {e}")
         return None
 
-def analyze_images(files_list, source_name, logger):
-    if not files_list: return []
-    print(f"\n📂 Analisi WCS {source_name}: {len(files_list)} file")
+
+def analyze_images(input_dir, source_name, logger):
+    """Analizza tutte le immagini in una directory."""
+    # Cerca tutti i file FITS, inclusi quelli con _wcs.fits dallo Step 1
+    files = list(Path(input_dir).glob('*.fits')) + \
+            list(Path(input_dir).glob('*.fit')) + \
+            list(Path(input_dir).glob('*_wcs.fits'))
+    
+    # Rimuovi duplicati (alcuni file potrebbero essere trovati due volte)
+    files = list(set(files))
+    
+    if not files:
+        with log_lock:
+            logger.warning(f"Nessun file in {input_dir}")
+        return []
+    
+    print(f"\n📂 {source_name}: {len(files)} file")
+    
     wcs_info_list = []
-    with tqdm(total=len(files_list), desc=f"   Analisi {source_name}") as pbar:
-        for filepath in files_list:
-            info = extract_wcs_info_safe(filepath, logger)
-            if info: wcs_info_list.append(info)
+    
+    with tqdm(total=len(files), desc=f"  Analisi {source_name}", unit="file") as pbar:
+        for filepath in files:
+            info = extract_wcs_info(filepath, logger)
+            if info:
+                wcs_info_list.append(info)
+                with log_lock:
+                    logger.info(f"✓ {os.path.basename(filepath)}: "
+                               f"RA={info['center_ra']:.4f}°, DEC={info['center_dec']:.4f}°, "
+                               f"scale={info['pixel_scale']:.4f}\"/px (NATIVA)")
+            else:
+                with log_lock:
+                    logger.warning(f"✗ {os.path.basename(filepath)}: WCS non valido")
             pbar.update(1)
-    print(f"   ✓ {len(wcs_info_list)}/{len(files_list)} con WCS valido")
+    
+    print(f"   ✓ {len(wcs_info_list)}/{len(files)} con WCS valido")
+    
     return wcs_info_list
+
 
 def create_common_wcs_frame(wcs_info_list, logger):
     """
-    Crea frame WCS comune con MARGINE ADATTIVO per evitare pixel persi.
+    Crea un WCS di riferimento comune che copre TUTTE le immagini.
+    Questo WCS serve solo come frame di riferimento - ogni immagine
+    manterrà la sua risoluzione nativa.
     """
-    if not wcs_info_list: 
-        return None, None, None
+    with log_lock:
+        logger.info("=" * 60)
+        logger.info("CREAZIONE FRAME WCS COMUNE (riferimento)")
+        logger.info("=" * 60)
     
-    # FASE 1: RACCOLTA BOUNDS DA TUTTI I CORNER
-    ra_min, ra_max = float('inf'), float('-inf')
-    dec_min, dec_max = float('inf'), float('-inf')
-    center_ra_approx = np.median([info['center_ra'] for info in wcs_info_list])
+    if not wcs_info_list:
+        with log_lock:
+            logger.error("Nessuna immagine fornita per creare WCS comune.")
+        return None
     
-    logger.info("\n" + "="*60)
-    logger.info("DIAGNOSTICA BOUNDS:")
+    # Trova i limiti del campo totale
+    ra_min = float('inf')
+    ra_max = float('-inf')
+    dec_min = float('inf')
+    dec_max = float('-inf')
     
-    for idx, info in enumerate(wcs_info_list):
-        wcs, shape = info['wcs'], info['shape']
+    for info in wcs_info_list:
+        wcs = info['wcs']
+        shape = info['shape']
         ny, nx = shape
         
-        # Corner in pixel space
-        corners = np.array([[0, 0], [nx, 0], [0, ny], [nx, ny]])
+        # Coordinate dei 4 angoli
+        corners_pix = np.array([
+            [0, 0], [nx, 0], [0, ny], [nx, ny]
+        ])
         
-        # Trasforma in world coordinates
-        world = wcs.wcs_pix2world(corners, 1)
+        corners_world = wcs.pixel_to_world(corners_pix[:, 0], corners_pix[:, 1])
         
-        logger.info(f"  Immagine {idx+1}: {info['file'].name}")
-        logger.info(f"    Centro: RA={info['center_ra']:.4f}, DEC={info['center_dec']:.4f}")
-        logger.info(f"    Shape: {nx}x{ny}, Scale: {info['pixel_scale']:.4f}\"/px")
-        
-        # Gestione wrap-around RA
-        for coord in world:
-            ra, dec = float(coord[0]), float(coord[1])
-            
-            # Normalizza RA rispetto al centro approssimativo
-            if ra > center_ra_approx + 180: 
-                ra -= 360
-            if ra < center_ra_approx - 180: 
-                ra += 360
-            
+        for coord in corners_world:
+            ra = coord.ra.deg
+            dec = coord.dec.deg
             ra_min = min(ra_min, ra)
             ra_max = max(ra_max, ra)
             dec_min = min(dec_min, dec)
             dec_max = max(dec_max, dec)
-        
-        logger.info(f"    Corner RA range: [{world[:,0].min():.4f}, {world[:,0].max():.4f}]")
-        logger.info(f"    Corner DEC range: [{world[:,1].min():.4f}, {world[:,1].max():.4f}]")
     
-    # FASE 2: CALCOLO CENTRO E SPAN
+    # Centro del campo
     ra_center = (ra_min + ra_max) / 2.0
     dec_center = (dec_min + dec_max) / 2.0
     
-    ra_span_deg = ra_max - ra_min
-    dec_span_deg = dec_max - dec_min
+    # Dimensioni campo (con margine)
+    ra_span = ra_max - ra_min
+    dec_span = dec_max - dec_min
     
-    logger.info(f"\nBounds globali (pre-margine):")
-    logger.info(f"  RA: [{ra_min:.4f}, {ra_max:.4f}] → span={ra_span_deg:.4f}°")
-    logger.info(f"  DEC: [{dec_min:.4f}, {dec_max:.4f}] → span={dec_span_deg:.4f}°")
-    logger.info(f"  Centro: RA={ra_center:.4f}°, DEC={dec_center:.4f}°")
+    margin_factor = 1.05
+    ra_span *= margin_factor
+    dec_span *= margin_factor
     
-    # FASE 3: PIXEL SCALE
-    pixel_scales_arcsec = [info['pixel_scale'] for info in wcs_info_list]
-    native_pixel_scale_arcsec = np.median(pixel_scales_arcsec) if pixel_scales_arcsec else 0.04
-    native_pixel_scale_deg = native_pixel_scale_arcsec / 3600.0
+    # Risoluzione di riferimento (non usata per calcolare dimensioni output!)
+    # Serve solo come orientamento del frame WCS
+    ref_pixel_scale_deg = 0.04 / 3600.0  # 0.04 arcsec/px (HST-like, ma arbitrario)
     
-    # FASE 4: MARGINE ADATTIVO
-    # Se ci sono poche immagini o sono già sovrapposte, usa margine maggiore
-    num_images = len(wcs_info_list)
+    # Crea WCS di riferimento
+    reference_wcs = WCS(naxis=2)
+    reference_wcs.wcs.ctype = ['RA---TAN', 'DEC--TAN']
+    reference_wcs.wcs.crval = [ra_center, dec_center]
+    reference_wcs.wcs.crpix = [1, 1]  # Pixel di riferimento
+    reference_wcs.wcs.cdelt = [-ref_pixel_scale_deg, ref_pixel_scale_deg]
+    reference_wcs.wcs.radesys = 'ICRS'
+    reference_wcs.wcs.equinox = 2000.0
     
-    if num_images == 1:
-        # Singola immagine: aggiungi 20% per sicurezza
-        margin_factor = 1.2
-    elif ra_span_deg < native_pixel_scale_deg * 100 and dec_span_deg < native_pixel_scale_deg * 100:
-        # Immagini molto vicine/sovrapposte: margine 50%
-        margin_factor = 1.5
-    elif ra_span_deg < native_pixel_scale_deg * 500:
-        # Campo piccolo: margine 30%
-        margin_factor = 1.3
-    else:
-        # Campo grande: margine 15%
-        margin_factor = 1.15
+    with log_lock:
+        logger.info(f"WCS Comune creato:")
+        logger.info(f"  Centro: RA={ra_center:.4f}°, DEC={dec_center:.4f}°")
+        logger.info(f"  Span: RA={ra_span:.4f}°, DEC={dec_span:.4f}°")
+        logger.info(f"  Risoluzione riferimento: {ref_pixel_scale_deg*3600:.4f}\"/px (solo orientamento)")
     
-    logger.info(f"\nMargine applicato: {margin_factor:.2f}x ({(margin_factor-1)*100:.0f}%)")
+    print(f"\n✓ WCS comune creato:")
+    print(f"   Centro: RA={ra_center:.4f}°, DEC={dec_center:.4f}°")
+    print(f"   Span: RA={ra_span:.4f}°, DEC={dec_span:.4f}°")
     
-    ra_span_deg *= margin_factor
-    dec_span_deg *= margin_factor
-    
-    # FASE 5: CALCOLO DIMENSIONI CANVAS
-    nx_out = int(np.ceil(abs(ra_span_deg) / native_pixel_scale_deg))
-    ny_out = int(np.ceil(abs(dec_span_deg) / native_pixel_scale_deg))
-    
-    # Dimensioni minime
-    nx_out = max(nx_out, 100)
-    ny_out = max(ny_out, 100)
-    
-    # Limita dimensioni massime
-    MAX_DIMENSION = 15000
-    if nx_out > MAX_DIMENSION or ny_out > MAX_DIMENSION:
-        logger.warning(f"Canvas ({nx_out}x{ny_out}) troppo grande! Ridimensiono...")
-        scale_factor = max(nx_out, ny_out) / MAX_DIMENSION
-        native_pixel_scale_deg *= scale_factor
-        native_pixel_scale_arcsec = native_pixel_scale_deg * 3600.0
-        nx_out = int(np.ceil(ra_span_deg / native_pixel_scale_deg))
-        ny_out = int(np.ceil(dec_span_deg / native_pixel_scale_deg))
-        logger.warning(f"Nuove dimensioni: {nx_out}x{ny_out}, scala={native_pixel_scale_arcsec:.4f}\"/px")
-    
-    common_shape = (ny_out, nx_out)
-    
-    # FASE 6: CREA WCS COMUNE
-    common_wcs = WCS(naxis=2)
-    common_wcs.wcs.ctype = ['RA---TAN', 'DEC--TAN']
-    common_wcs.wcs.crval = [ra_center, dec_center]
-    common_wcs.wcs.crpix = [nx_out / 2.0, ny_out / 2.0]
-    
-    # CD matrix
-    cd_matrix = np.array([
-        [-native_pixel_scale_deg, 0.0],
-        [0.0, native_pixel_scale_deg]
-    ])
-    common_wcs.wcs.cd = cd_matrix
-    common_wcs.wcs.radesys = 'ICRS'
-    common_wcs.wcs.equinox = 2000.0
-    
-    # FASE 7: VERIFICA COVERAGE
-    logger.info("\nVERIFICA COVERAGE PRE-REPROIEZIONE:")
-    all_pixels_covered = True
-    
-    for idx, info in enumerate(wcs_info_list):
-        wcs_orig = info['wcs']
-        shape_orig = info['shape']
-        ny, nx = shape_orig
-        
-        # Test corners
-        corners_pix = np.array([[0, 0], [nx, 0], [0, ny], [nx, ny]])
-        corners_world = wcs_orig.wcs_pix2world(corners_pix, 1)
-        
-        # Proietta nel nuovo frame
-        corners_new_pix = common_wcs.wcs_world2pix(corners_world, 1)
-        
-        # Verifica se dentro bounds
-        x_min, x_max = corners_new_pix[:, 0].min(), corners_new_pix[:, 0].max()
-        y_min, y_max = corners_new_pix[:, 1].min(), corners_new_pix[:, 1].max()
-        
-        inside = (x_min >= -10 and x_max <= nx_out + 10 and 
-                  y_min >= -10 and y_max <= ny_out + 10)
-        
-        status = "✓ OK" if inside else "✗ FUORI BOUNDS"
-        logger.info(f"  Img {idx+1}: X=[{x_min:.0f}, {x_max:.0f}], Y=[{y_min:.0f}, {y_max:.0f}] {status}")
-        
-        if not inside:
-            all_pixels_covered = False
-            logger.warning(f"  ⚠️ Immagine {idx+1} esce dai bounds! Aumenta margine.")
-    
-    # FASE 8: RIEPILOGO
-    size_mb = (nx_out * ny_out * 4) / (1024**2)
-    
-    logger.info("\n" + "="*60)
-    logger.info("WCS COMUNE FINALE:")
-    logger.info(f"  Centro: RA={ra_center:.4f}°, DEC={dec_center:.4f}°")
-    logger.info(f"  Estensione: RA={ra_span_deg:.4f}°, DEC={dec_span_deg:.4f}°")
-    logger.info(f"  Canvas: {nx_out}x{ny_out} pixel")
-    logger.info(f"  Scala: {native_pixel_scale_arcsec:.4f}\"/px")
-    logger.info(f"  Memoria: {size_mb:.1f} MB/immagine")
-    logger.info(f"  Coverage check: {'✓ PASS' if all_pixels_covered else '✗ FAIL (possibili pixel persi)'}")
-    logger.info("="*60)
-    
-    print(f"\n✓ WCS comune: RA={ra_center:.4f}°, DEC={dec_center:.4f}°")
-    print(f"✓ Frame comune: {nx_out}x{ny_out} pixel, scala={native_pixel_scale_arcsec:.4f}\"/px")
-    print(f"✓ Coverage: {'OK' if all_pixels_covered else 'WARNING - controlla log'}")
-    
-    return common_wcs, common_shape, native_pixel_scale_arcsec
+    return reference_wcs
 
 
-# SOSTITUISCI la funzione reproject_image_native completa (linea ~547):
-
-def reproject_image_native(wcs_info, common_wcs, common_shape, common_scale_arcsec, output_dir, logger):
+def reproject_image_native(wcs_info, common_wcs, output_dir, logger):
     """
-    Reproiezione con fix per WCS HST/HUBBLE.
-    FIX CRITICO: Usa reproject_adaptive invece di reproject_interp per gestire WCS complessi.
+    Riproietta un'immagine mantenendo la sua risoluzione NATIVA.
+    
+    IMPORTANTE: Ogni immagine decide autonomamente le dimensioni del suo canvas
+    in base alla sua risoluzione originale. Non c'è una dimensione target comune.
     """
     try:
         filepath = wcs_info['file']
         hdu_index = wcs_info['hdu_index']
+        native_pixel_scale = wcs_info['pixel_scale']  # arcsec/px NATIVO
         filename = os.path.basename(filepath)
         
         with fits.open(filepath) as hdul:
             hdu = hdul[hdu_index]
-            data_original = hdu.data.copy()
+            data = hdu.data
             header = hdu.header.copy()
             wcs_orig = WCS(header)
             
-            # ...existing code per len(shape)==3...
-            if len(data_original.shape) == 3:
-                data_original = data_original[0]
+            if len(data.shape) == 3:
+                data = data[0]
             
-            # FIX 1: Normalizza RADESYS tra WCS input e output
-            if hasattr(wcs_orig.wcs, 'radesys') and wcs_orig.wcs.radesys:
-                if wcs_orig.wcs.radesys != common_wcs.wcs.radesys:
-                    with log_lock:
-                        logger.warning(f"{filename}: RADESYS mismatch (input={wcs_orig.wcs.radesys}, common={common_wcs.wcs.radesys})")
-                        logger.info(f"  Forzando conversione a {common_wcs.wcs.radesys}")
-                    
-                    # Forza conversione WCS
-                    wcs_orig = wcs_orig.deepcopy()
-                    wcs_orig.wcs.radesys = common_wcs.wcs.radesys
-                    wcs_orig.wcs.equinox = common_wcs.wcs.equinox
+            original_shape = data.shape
             
-            # ...existing validation code...
-            valid_mask_orig = np.isfinite(data_original) & (data_original != 0)
-            valid_data_orig = data_original[valid_mask_orig]
-            if valid_data_orig.size < 100 or (valid_data_orig.max() - valid_data_orig.min()) < MIN_RANGE_THRESHOLD:
-                with log_lock:
-                    logger.warning(f"⚠️  {filename}: Dati originali insufficienti.")
-                return {'status': 'error', 'file': filename, 'reason': 'Insufficient data range/pixels'}
+            # === CALCOLO DIMENSIONI OUTPUT BASATE SU RISOLUZIONE NATIVA ===
+            native_pixel_scale_deg = native_pixel_scale / 3600.0
             
-            unique_orig = len(np.unique(valid_data_orig[:min(10000, valid_data_orig.size)]))
-            if unique_orig < MIN_UNIQUE_VALUES_ORIGINAL:
-                with log_lock:
-                    logger.error(f"❌ {filename}: Dati originali binari ({unique_orig} valori)")
-                return {'status': 'error', 'file': filename, 'reason': f'Binary original ({unique_orig})'}
+            # Calcola quanti gradi copre l'immagine originale
+            ny_orig, nx_orig = original_shape
             
-            # Normalization
-            p_low = np.percentile(valid_data_orig, PERCENTILE_LOW)
-            p_high = np.percentile(valid_data_orig, PERCENTILE_HIGH)
-            data_clipped = np.clip(data_original, p_low, p_high)
-            data_normalized = (data_clipped - p_low) / (p_high - p_low) if p_high > p_low else data_clipped
-            data_normalized[~valid_mask_orig] = np.nan
-            
-            # FIX 2: Usa reproject_adaptive per WCS complessi (più robusto)
-            with log_lock:
-                logger.info(f"🔄 {filename}: Avvio reproiezione (metodo: adaptive)...")
-            
+            # Calcola pixel scale dall'immagine originale (gestisce sia cd che cdelt)
             try:
-                from reproject import reproject_adaptive
-                reprojected_norm, footprint = reproject_adaptive(
-                    (data_normalized, wcs_orig), 
-                    common_wcs, 
-                    shape_out=common_shape,
-                    return_footprint=True,
-                    kernel='gaussian',
-                    sample_region_width=4
-                )
-            except ImportError:
-                # Fallback a interp con ordine ridotto
-                with log_lock:
-                    logger.warning(f"{filename}: reproject_adaptive non disponibile, uso interp order=1")
-                reprojected_norm, footprint = reproject_interp(
-                    (data_normalized, wcs_orig), 
-                    common_wcs, 
-                    shape_out=common_shape,
-                    order=1,  # RIDOTTO da 'bicubic' a 1 (lineare)
-                    return_footprint=True
-                )
+                if hasattr(wcs_orig.wcs, 'cd') and wcs_orig.wcs.cd is not None:
+                    # Usa CD matrix
+                    cd = wcs_orig.wcs.cd
+                    pixel_scale_ra = np.sqrt(cd[0,0]**2 + cd[0,1]**2)
+                    pixel_scale_dec = np.sqrt(cd[1,0]**2 + cd[1,1]**2)
+                else:
+                    # Usa CDELT
+                    pixel_scale_ra = abs(wcs_orig.wcs.cdelt[0])
+                    pixel_scale_dec = abs(wcs_orig.wcs.cdelt[1])
+            except:
+                # Fallback: usa il pixel scale nativo calcolato prima
+                pixel_scale_ra = native_pixel_scale_deg
+                pixel_scale_dec = native_pixel_scale_deg
             
-            # DEBUG OUTPUT
-            with log_lock:
-                logger.info(f"DEBUG {filename}:")
-                logger.info(f"  WCS orig: RADESYS={wcs_orig.wcs.radesys}, EQUINOX={wcs_orig.wcs.equinox}")
-                logger.info(f"  WCS common: RADESYS={common_wcs.wcs.radesys}, EQUINOX={common_wcs.wcs.equinox}")
-                logger.info(f"  Input shape: {data_normalized.shape}")
-                logger.info(f"  Output shape: {reprojected_norm.shape}")
-                logger.info(f"  Input finite: {np.isfinite(data_normalized).sum()}/{data_normalized.size}")
-                logger.info(f"  Output finite: {np.isfinite(reprojected_norm).sum()}/{reprojected_norm.size}")
-                logger.info(f"  Footprint >0: {(footprint > 0).sum()}/{footprint.size}")
-                logger.info(f"  Footprint max: {footprint.max():.4f}")
+            ra_span = pixel_scale_ra * nx_orig
+            dec_span = pixel_scale_dec * ny_orig
             
-            # ...resto del codice esistente (footprint_safe, denorm, save)...
-            footprint_safe = np.clip(footprint, 0, 1)
-            valid_reproj = (footprint_safe > 0.01) & np.isfinite(reprojected_norm)
-            reprojected_weighted = np.where(valid_reproj, reprojected_norm * footprint_safe, np.nan)
+            # Calcola dimensioni output per mantenere la stessa copertura
+            # alla risoluzione nativa
+            nx_out = int(np.ceil(abs(ra_span) / native_pixel_scale_deg))
+            ny_out = int(np.ceil(abs(dec_span) / native_pixel_scale_deg))
             
-            reprojected_denorm = reprojected_weighted.copy()
-            valid_mask_final = np.isfinite(reprojected_weighted)
-            if not np.any(valid_mask_final):
-                with log_lock:
-                    logger.error(f"❌ {filename}: NESSUN PIXEL DOPO REPROIEZIONE.")
-                return {'status': 'error', 'file': filename, 'reason': 'No pixels after reproject'}
+            shape_out = (ny_out, nx_out)
             
-            reprojected_denorm[valid_mask_final] = (reprojected_weighted[valid_mask_final] * (p_high - p_low) + p_low)
+            # Crea WCS target con risoluzione nativa
+            target_wcs = WCS(naxis=2)
+            target_wcs.wcs.ctype = common_wcs.wcs.ctype
+            target_wcs.wcs.crval = wcs_orig.wcs.crval  # Stesso centro dell'originale
+            target_wcs.wcs.crpix = [nx_out / 2.0, ny_out / 2.0]
+            target_wcs.wcs.cdelt = [-native_pixel_scale_deg, native_pixel_scale_deg]
+            target_wcs.wcs.radesys = common_wcs.wcs.radesys
+            target_wcs.wcs.equinox = common_wcs.wcs.equinox
             
-            final_valid = reprojected_denorm[valid_mask_final]
-            unique_final = len(np.unique(final_valid[:min(10000, final_valid.size)]))
-            if unique_final < MIN_UNIQUE_VALUES_NORMALIZED or (final_valid.max() - final_valid.min()) < MIN_RANGE_THRESHOLD:
-                with log_lock:
-                    logger.error(f"❌ {filename}: Dati finali corrotti/binari ({unique_final} valori)")
-                return {'status': 'error', 'file': filename, 'reason': 'Binary/corrupted final data'}
+            # Reproject
+            reprojected_data, footprint = reproject_interp(
+                (data, wcs_orig),
+                target_wcs,
+                shape_out=shape_out,
+                order=REPROJECT_ORDER
+            )
             
-            coverage = (valid_mask_final.sum() / reprojected_denorm.size * 100)
-            new_header = common_wcs.to_header()
+            # Calcola coverage
+            valid_pixels = np.sum(footprint > 0)
+            total_pixels = footprint.size
+            coverage = (valid_pixels / total_pixels * 100) if total_pixels > 0 else 0
+            
+            # Crea nuovo header
+            new_header = target_wcs.to_header()
+            
+            # Mantieni metadati originali
+            for key in ['DATE-OBS', 'EXPTIME', 'FILTER', 'INSTRUME', 'TELESCOP']:
+                if key in header:
+                    new_header[key] = header[key]
+            
+            new_header['ORIGINAL'] = filename
             new_header['REGDATE'] = datetime.now().isoformat()
-            new_header['REGCOV'] = (coverage, "Coverage %")
+            new_header['REGCOV'] = (coverage, "Percentuale copertura valida")
+            new_header['REGVALID'] = (valid_pixels, "Numero di pixel validi")
+            new_header['REGORD'] = (str(REPROJECT_ORDER), "Ordine interpolazione")
+            new_header['NATIVESC'] = (native_pixel_scale, "Risoluzione nativa (arcsec/px)")
+            new_header['ORIGSHP0'] = (original_shape[0], "Shape originale (altezza)")
+            new_header['ORIGSHP1'] = (original_shape[1], "Shape originale (larghezza)")
             
+            # Nome output
             output_filename = f"reg_{os.path.splitext(filename)[0]}.fits"
             output_path = output_dir / output_filename
-            fits.PrimaryHDU(data=reprojected_denorm.astype(np.float32), header=new_header).writeto(output_path, overwrite=True)
+            
+            # Salva
+            fits.PrimaryHDU(
+                data=reprojected_data.astype(np.float32),
+                header=new_header
+            ).writeto(output_path, overwrite=True)
             
             with log_lock:
-                logger.info(f"✅ {filename}: cov={coverage:.1f}%, shape={common_shape}")
-            return {'status': 'success', 'file': filename, 'coverage': coverage}
+                logger.info(f"✓ {filename}: coverage={coverage:.1f}%, "
+                           f"shape={shape_out}, native_scale={native_pixel_scale:.4f}\"/px")
+            
+            return {
+                'status': 'success',
+                'file': filename,
+                'coverage': coverage,
+                'valid_pixels': valid_pixels,
+                'output_path': output_path,
+                'native_scale': native_pixel_scale,
+                'output_shape': shape_out
+            }
             
     except Exception as e:
         with log_lock:
-            logger.error(f"❌ {os.path.basename(filepath)}: {e}", exc_info=True)
+            logger.error(f"Errore {os.path.basename(filepath)}: {e}")
         return {'status': 'error', 'file': os.path.basename(filepath), 'reason': str(e)}
 
-def register_images(wcs_info_list, common_wcs, common_shape, common_scale, output_dir, source_name, logger):
-    """Registra immagini con multithreading."""
+
+def register_images(wcs_info_list, common_wcs, output_dir, source_name, logger):
+    """Registra tutte le immagini con multithreading, ognuna alla sua risoluzione nativa."""
     os.makedirs(output_dir, exist_ok=True)
-    print(f"\n🔄 Registrazione {source_name}: {len(wcs_info_list)} immagini")
     
-    success_count = 0; error_count = 0
+    print(f"\n🔄 Registrazione {source_name}: {len(wcs_info_list)} immagini (risoluzione nativa)")
+    
+    success_count = 0
+    error_count = 0
+    
     with ThreadPoolExecutor(max_workers=NUM_THREADS) as executor:
         futures = {
-            executor.submit(reproject_image_native, info, common_wcs, common_shape, common_scale, output_dir, logger): info
+            executor.submit(reproject_image_native, info, common_wcs, output_dir, logger): info
             for info in wcs_info_list
         }
-        with tqdm(total=len(wcs_info_list), desc=f"   {source_name}") as pbar:
+        
+        with tqdm(total=len(wcs_info_list), desc=f"  {source_name}") as pbar:
             for future in as_completed(futures):
                 try:
                     result = future.result()
-                    if result['status'] == 'success': success_count += 1
-                    else: error_count += 1
+                    
+                    if result['status'] == 'success':
+                        success_count += 1
+                        pbar.set_description(f"✓ {success_count}")
+                    else:
+                        error_count += 1
+                        pbar.set_description(f"❌ {error_count}")
+                        
                 except Exception as exc:
                     error_count += 1
-                    with log_lock: logger.error(f"Thread exception: {exc}")
+                    with log_lock:
+                        logger.error(f"Exception nel thread pool: {exc}")
+                
                 pbar.update(1)
     
-    print(f"   ✓ Successo: {success_count}, ✗ Errori: {error_count}")
+    print(f"   ✓ Successo: {success_count}")
+    print(f"   ✗ Errori: {error_count}")
+    
+    with log_lock:
+        logger.info(f"{source_name}: {success_count} successo, {error_count} errori")
+    
     return success_count, error_count
 
 # ============================================================================
-# MAIN PIPELINE
+# MAIN: ESECUZIONE PIPELINE
 # ============================================================================
 
-def main_step1(input_obs, input_lith, output_obs_wcs, output_lith_wcs, logger):
-    """Esegue Plate Solving (Siril) e WCS Extraction."""
-    logger.info("="*60)
-    logger.info("STEP 1: PLATE SOLVING (SIRIL) + WCS EXTRACTION")
-    logger.info("="*60)
+def main_step1(INPUT_OSSERVATORIO, INPUT_LITH, OUTPUT_OSSERVATORIO_WCS, OUTPUT_LITH_WCS, logger):
+    """Funzione principale Step 1."""
+    logger.info("=" * 60)
+    logger.info(f"PREPARAZIONE: CONVERSIONE WCS DA COORDINATE")
+    logger.info("=" * 60)
     
-    print("\n" + "="*70)
-    print("STEP 1: PLATE SOLVING (SIRIL) + WCS EXTRACTION".center(70))
-    print("="*70)
+    print("=" * 70)
+    print(f"🔭 PREPARAZIONE: CONVERSIONE COORDINATE → WCS".center(70))
+    print("=" * 70)
     
-    prepared_file_paths, _ = prepare_images_with_platesolving(
-        logger, 
-        input_obs, 
-        output_obs_wcs, 
-        input_lith,
-        output_lith_wcs
+    print(f"\nInput Osservatorio (ricorsivo): {INPUT_OSSERVATORIO}")
+    print(f"Input LITH/HST (ricorsivo): {INPUT_LITH}")
+    
+    # Setup
+    os.makedirs(OUTPUT_OSSERVATORIO_WCS, exist_ok=True)
+    os.makedirs(OUTPUT_LITH_WCS, exist_ok=True)
+    
+    # OSSERVATORIO
+    print("\n📡 OSSERVATORIO (Conversione OBJCTRA/OBJCTDEC → WCS)")
+    
+    prep_oss, fail_oss, stats_oss = process_osservatorio_folder(
+        INPUT_OSSERVATORIO,
+        OUTPUT_OSSERVATORIO_WCS,
+        logger
     )
     
-    total = len(prepared_file_paths)
-    logger.info(f"Step 1 completato: {total} file con WCS pronti.")
+    print(f"\n   ✓ Processati: {prep_oss}")
+    print(f"   ✗ Falliti: {fail_oss}")
     
-    # Ritorna i percorsi separati per il raggruppamento nello Step 2
-    local_wcs_files = [p for p in prepared_file_paths if p.parent == output_obs_wcs]
-    lith_wcs_files = [p for p in prepared_file_paths if p.parent == output_lith_wcs]
+    if stats_oss:
+        ra_min, ra_max = stats_oss['ra_range']
+        dec_min, dec_max = stats_oss['dec_range']
+        print(f"\n   📊 Campo:")
+        print(f"      RA: {ra_min:.4f}° → {ra_max:.4f}° (span: {ra_max-ra_min:.4f}°)")
+        print(f"      DEC: {dec_min:.4f}° → {dec_max:.4f}° (span: {dec_max-dec_min:.4f}°)")
+        print(f"      Scala media: {stats_oss['avg_scale']:.3f}\"/px")
     
-    return total > 0, local_wcs_files, lith_wcs_files
+    # LITH
+    print("\n🛰️  LITH/HST (Estrazione WCS esistente)")
+    
+    prep_lith, fail_lith, stats_lith = process_lith_folder(
+        INPUT_LITH,
+        OUTPUT_LITH_WCS,
+        logger
+    )
+    
+    print(f"\n   ✓ Processati: {prep_lith}")
+    print(f"   ✗ Falliti: {fail_lith}")
+    
+    if stats_lith:
+        ra_min, ra_max = stats_lith['ra_range']
+        dec_min, dec_max = stats_lith['dec_range']
+        print(f"\n   📊 Campo:")
+        print(f"      RA: {ra_min:.4f}° → {ra_max:.4f}° (span: {ra_max-ra_min:.4f}°)")
+        print(f"      DEC: {dec_min:.4f}° → {dec_max:.4f}° (span: {dec_max-dec_min:.4f}°)")
+        print(f"      Scala media: {stats_lith['avg_scale']:.3f}\"/px")
+    
+    # RIEPILOGO
+    total_prep = prep_oss + prep_lith
+    total_fail = fail_oss + fail_lith
+    
+    logger.info(f"Totale: {total_prep} preparati, {total_fail} falliti")
+    
+    if total_prep > 0:
+        print(f"\n✅ COMPLETATO! File con WCS in:\n       • {OUTPUT_OSSERVATORIO_WCS}\n       • {OUTPUT_LITH_WCS}")
+    else:
+        print(f"\n⚠️ Nessun file processato.")
+    
+    return total_prep > 0
 
-def main_step2(local_wcs_files, lith_wcs_files, output_hubble, output_obs, logger):
-    """Esegue Step 2: Registrazione."""
-    if not REPROJECT_AVAILABLE: return False
+
+def main_step2(INPUT_HUBBLE, INPUT_OBSERVATORY, OUTPUT_HUBBLE, OUTPUT_OBSERVATORY, BASE_DIR, logger):
+    """Funzione principale Step 2."""
+    if not REPROJECT_AVAILABLE:
+        print("\n⚠️ Step 2 saltato: libreria reproject non disponibile")
+        return False
     
-    logger.info("="*60)
-    logger.info("STEP 2: REGISTRAZIONE GLOBALE")
-    logger.info("="*60)
+    logger.info("=" * 60)
+    logger.info("REGISTRAZIONE CON RISOLUZIONE NATIVA")
+    logger.info("=" * 60)
     
-    print("\n" + "="*70)
-    print("STEP 2: REGISTRAZIONE GLOBALE".center(70))
-    print("="*70)
+    print("\n" + "🔭"*35)
+    print(f"STEP 3: REGISTRAZIONE (RISOLUZIONE NATIVA)".center(70))
+    print("🔭"*35)
     
-    hubble_info = analyze_images(lith_wcs_files, "HUBBLE (WCS)", logger)
-    obs_info = analyze_images(local_wcs_files, "OBSERVATORY (WCS)", logger)
+    print(f"\n📂 CONFIGURAZIONE:")
+    print(f"   Input Hubble: {INPUT_HUBBLE}")
+    print(f"   Input Observatory: {INPUT_OBSERVATORY}")
+    print(f"   Output: {BASE_DIR / '3_registered_native'}")
+    
+    # Analizza immagini
+    print(f"\n{'='*70}")
+    print("ANALISI IMMAGINI")
+    print(f"{'='*70}")
+    
+    hubble_info = analyze_images(INPUT_HUBBLE, "HUBBLE", logger)
+    obs_info = analyze_images(INPUT_OBSERVATORY, "OBSERVATORY", logger)
+    
     all_info = hubble_info + obs_info
-    
     if not all_info:
-        logger.error("Nessuna immagine con WCS valido trovata per la registrazione.")
+        print(f"\n❌ Nessuna immagine con WCS valido trovata. Interruzione.")
+        logger.error("Nessuna immagine con WCS valido trovata.")
         return False
     
+    # Mostra statistiche risoluzione
+    print(f"\n📊 RISOLUZIONI NATIVE RILEVATE:")
+    for source_name, info_list in [("Hubble", hubble_info), ("Observatory", obs_info)]:
+        if info_list:
+            scales = [info['pixel_scale'] for info in info_list]
+            print(f"\n   {source_name}:")
+            print(f"      Min: {min(scales):.4f}\"/px")
+            print(f"      Max: {max(scales):.4f}\"/px")
+            print(f"      Media: {np.mean(scales):.4f}\"/px")
+            print(f"      → Tutte manterranno la loro risoluzione originale!")
+    
+    # Crea frame WCS comune (solo per riferimento)
     print(f"\n{'='*70}")
-    print("CREAZIONE WCS COMUNE")
+    print("CREAZIONE FRAME WCS COMUNE")
     print(f"{'='*70}")
     
-    common_wcs, common_shape, common_scale = create_common_wcs_frame(all_info, logger)
+    common_wcs = create_common_wcs_frame(all_info, logger)
+    
     if common_wcs is None:
-        logger.error("Impossibile creare frame WCS comune")
+        print(f"\n❌ Impossibile creare WCS comune!")
+        logger.error("Creazione WCS comune fallita.")
         return False
     
+    # Registrazione
     print(f"\n{'='*70}")
-    print("REGISTRAZIONE")
+    print("REGISTRAZIONE (Risoluzione Nativa)")
     print(f"{'='*70}")
     
-    total_success = 0; total_error = 0
+    total_success = 0
+    total_error = 0
     
     if hubble_info:
-        s, e = register_images(hubble_info, common_wcs, common_shape, common_scale, output_hubble, "Hubble", logger)
-        total_success += s; total_error += e
+        s, e = register_images(hubble_info, common_wcs, OUTPUT_HUBBLE, "Hubble", logger)
+        total_success += s
+        total_error += e
     
     if obs_info:
-        s, e = register_images(obs_info, common_wcs, common_shape, common_scale, output_obs, "Observatory", logger)
-        total_success += s; total_error += e
+        s, e = register_images(obs_info, common_wcs, OUTPUT_OBSERVATORY, "Observatory", logger)
+        total_success += s
+        total_error += e
     
+    # Riepilogo
     print(f"\n{'='*70}")
-    print(f"TOTALE REGISTRAZIONE: {total_success} successo, {total_error} errori")
+    print("📊 RIEPILOGO REGISTRAZIONE")
     print(f"{'='*70}")
+    print(f"\n   Totale registrate: {total_success}")
+    print(f"   Totale errori: {total_error}")
     
-    logger.info(f"Step 2 completato: {total_success} registrate")
+    if total_success > 0:
+        print(f"\n✅ REGISTRAZIONE COMPLETATA!")
+        print(f"\n   ✨ VANTAGGIO: Ogni immagine ha mantenuto la sua risoluzione nativa!")
+    
+    with log_lock:
+        logger.info(f"Registrazione completata: {total_success} successo, {total_error} errori")
+    
     return total_success > 0
 
-def ask_continue_to_cropping():
-    """Chiede se continuare con Step 3+4."""
-    print("\n" + "="*70)
-    print("🎯 STEP 1+2 COMPLETATI!")
-    print("="*70)
-    print("\n📋 Vuoi continuare con Step 3+4 (Ritaglio e Mosaico)?")
-    
-    while True:
-        choice = input("👉 [S/n, default=S]: ").strip().lower()
-        if choice in ('', 's', 'si', 'y', 'yes'):
-            return True
-        elif choice in ('n', 'no'):
-            return False
-        print("❌ Inserisci S o N")
 
 def main():
-    """Main pipeline."""
+    """Funzione principale della pipeline."""
+    
     logger = setup_logging()
     
+    # Seleziona uno o più target
     target_dirs = select_target_directory()
-    if not target_dirs: return
-    
-    print("\n" + "="*70)
-    print("PIPELINE: WCS SOLVING (SIRIL) + REGISTRATION (FULL)".center(70))
-    print("="*70)
-    
-    start_time = time.time()
-    successful = []; failed = []
-    
-    for base_dir in target_dirs:
-        print("\n" + "🚀"*35)
-        print(f"TARGET: {base_dir.name}".center(70))
-        print("🚀"*35)
-        
-        # Percorsi
-        input_obs = base_dir / '1_origin' / 'local_raw'
-        input_lith = base_dir / '1_origin' / 'img_lights'
-        # Output Plate Solved (Local)
-        output_obs_wcs = base_dir / '2_platesolved' / 'observatory'
-        # Output WCS Extracted (HST/LITH)
-        output_lith_wcs = base_dir / '2_platesolved' / 'hubble'
-        # Output Registrazione
-        output_hubble = base_dir / '3_registered_native' / 'hubble'
-        output_obs = base_dir / '3_registered_native' / 'observatory'
+    if not target_dirs:
+        print("Nessun target selezionato. Uscita.")
+        return
 
-        # Step 1
-        t1 = time.time()
-        step1_ok, local_wcs_files, lith_wcs_files = main_step1(input_obs, input_lith, output_obs_wcs, output_lith_wcs, logger)
-        print(f"\n⏱️  Step 1: {time.time()-t1:.2f}s")
+    logger.info("=" * 60)
+    logger.info("PIPELINE UNIFICATA: STEP 1 + STEP 2")
+    logger.info(f"TARGET SELEZIONATI: {[d.name for d in target_dirs]}")
+    logger.info("=" * 60)
+
+    print("\n" + "=" * 70)
+    print("🚀 PIPELINE COMPLETA: CONVERSIONE WCS + REGISTRAZIONE")
+    if len(target_dirs) > 1:
+        print(f"Modalità Batch: {len(target_dirs)} target".center(70))
+    print("=" * 70)
+
+    start_time_total = time.time()
+    successful_targets = []
+    failed_targets = []
+
+    for BASE_DIR in target_dirs:
+        print("\n" + "🚀"*35)
+        print(f"INIZIO ELABORAZIONE TARGET: {BASE_DIR.name}".center(70))
+        print("🚀"*35)
+        logger.info(f"INIZIO TARGET: {BASE_DIR.name}")
+
+        # Definizione percorsi per QUESTO target
+        INPUT_OSSERVATORIO = BASE_DIR / '1_originarie' / 'local_raw'
+        INPUT_LITH = BASE_DIR / '1_originarie' / 'img_lights'
+        OUTPUT_OSSERVATORIO_WCS = BASE_DIR / '2_wcs' / 'osservatorio'
+        OUTPUT_LITH_WCS = BASE_DIR / '2_wcs' / 'hubble'
         
-        if not step1_ok:
-            failed.append(base_dir)
-            continue
+        # INPUT STEP 2 (stesso degli output Step 1)
+        INPUT_HUBBLE = OUTPUT_LITH_WCS
+        INPUT_OBSERVATORY = OUTPUT_OSSERVATORIO_WCS
         
-        # Step 2
-        t2 = time.time()
-        step2_ok = main_step2(local_wcs_files, lith_wcs_files, output_hubble, output_obs, logger)
-        print(f"\n⏱️  Step 2: {time.time()-t2:.2f}s")
+        # OUTPUT STEP 2
+        OUTPUT_HUBBLE = BASE_DIR / '3_registered_native' / 'hubble'
+        OUTPUT_OBSERVATORY = BASE_DIR / '3_registered_native' / 'observatory'
+
+        # STEP 1
+        step1_start = time.time()
+        step1_success = main_step1(INPUT_OSSERVATORIO, INPUT_LITH, OUTPUT_OSSERVATORIO_WCS, OUTPUT_LITH_WCS, logger)
+        step1_time = time.time() - step1_start
+        print(f"\n⏱️ Tempo Step 1 (WCS): {step1_time:.2f}s")
+
+        if not step1_success:
+            print(f"\n❌ Pipeline interrotta per {BASE_DIR.name}: Step 1 fallito")
+            logger.error(f"Step 1 fallito per {BASE_DIR.name}")
+            failed_targets.append(BASE_DIR)
+            continue # Salta al prossimo target
+
+        # STEP 2
+        step2_start = time.time()
+        step2_success = main_step2(INPUT_HUBBLE, INPUT_OBSERVATORY, OUTPUT_HUBBLE, OUTPUT_OBSERVATORY, BASE_DIR, logger)
+        step2_time = time.time() - step2_start
+        print(f"\n⏱️ Tempo Step 2 (Registro): {step2_time:.2f}s")
         
-        if step2_ok: successful.append(base_dir)
-        else: failed.append(base_dir)
-    
-    # Riepilogo finale
-    elapsed = time.time() - start_time
-    print("\n" + "="*70)
-    print("RIEPILOGO FINALE".center(70))
-    print("="*70)
-    print(f"\n   Target: {len(target_dirs)}")
-    print(f"   ✅ Successo: {len(successful)}")
-    for t in successful: print(f"      - {t.name}")
-    print(f"\n   ❌ Falliti: {len(failed)}")
-    for t in failed: print(f"      - {t.name}")
-    print(f"\n   ⏱️  Tempo totale: {elapsed:.2f}s")
-    
-    if not successful: return
-    
-    # Continua con Step 3+4
-    if ask_continue_to_cropping():
-        next_script = SCRIPTS_DIR / 'step2_croppedmosaico.py'
-        if next_script.exists():
-            for base_dir in successful:
-                print(f"\n--- Step 3+4: {base_dir.name} ---")
-                subprocess.run([sys.executable, str(next_script), str(base_dir)])
+        if step2_success:
+            successful_targets.append(BASE_DIR)
+            logger.info(f"TARGET COMPLETATO: {BASE_DIR.name}")
         else:
-            print(f"\n⚠️  {next_script.name} non trovato. Non è possibile proseguire con il mosaico.")
+            failed_targets.append(BASE_DIR)
+            logger.error(f"Step 2 fallito per {BASE_DIR.name}")
+            
+        print(f"⏱️ Tempo totale per {BASE_DIR.name}: {step1_time + step2_time:.2f}s")
+
+    # RIEPILOGO FINALE BATCH
+    elapsed_total = time.time() - start_time_total
+    print("\n" + "=" * 70)
+    print("📊 RIEPILOGO PIPELINE COMPLETA (BATCH)")
+    print("=" * 70)
+    print(f"   Target totali selezionati: {len(target_dirs)}")
+    print(f"   ✅ Completati con successo: {len(successful_targets)}")
+    for target in successful_targets:
+        print(f"      - {target.name}")
+    print(f"\n   ❌ Falliti: {len(failed_targets)}")
+    for target in failed_targets:
+        print(f"      - {target.name}")
+    print(f"\n   ⏱️ Tempo totale batch: {elapsed_total:.2f}s")
+
+    if not successful_targets:
+        print("\n❌ Nessun target completato con successo.")
+        return
+
+    # TRANSIZIONE AI PROSSIMI SCRIPT (da v1)
+    if ask_continue_to_cropping():
+        try:
+            # Usa la cartella dinamica degli script
+            next_script = SCRIPTS_DIR / 'step2_croppedmosaico.py'
+            
+            if next_script.exists():
+                print(f"\n🚀 Avvio Step 3+4 in loop per {len(successful_targets)} target...")
+                for BASE_DIR in successful_targets:
+                    print(f"\n--- Avvio per {BASE_DIR.name} ---")
+                    subprocess.run([sys.executable, str(next_script), str(BASE_DIR)])
+                    print(f"--- Completato {BASE_DIR.name} ---")
+            else:
+                print(f"\n⚠️  Script {next_script.name} non trovato nella directory {SCRIPTS_DIR}")
+                print(f"   Eseguilo manualmente quando pronto")
+        except Exception as e:
+            print(f"\n⚠️  Impossibile avviare automaticamente {next_script.name}: {e}")
+            print(f"   Eseguilo manualmente: python {next_script.name}")
+    else:
+        print("\n👋 Arrivederci!")
+
 
 if __name__ == "__main__":
+    start_time = time.time()
     main()
+    elapsed = time.time() - start_time
+    print(f"\n⏱️ Tempo totale esecuzione script: {elapsed:.2f}s")
