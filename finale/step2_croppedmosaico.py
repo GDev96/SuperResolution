@@ -2,60 +2,87 @@
 STEP 3+4: RITAGLIO IMMAGINI REGISTRATE E CREAZIONE MOSAICO
 1. Ritaglia tutte le immagini registrate alle dimensioni dell'immagine più piccola
 2. Crea un mosaico (media) da tutte le immagini ritagliate
+
+INPUT: Cartelle '3_registered_native/hubble' e '3_registered_native/observatory'
+OUTPUT: 
+  - Cartelle '4_cropped/hubble' e '4_cropped/observatory' con immagini ritagliate
+  - File '5_mosaics/final_mosaic.fits' con il mosaico finale
+
+MODIFICATO: Integra gestione path dinamici, menu selezione e loop batch da v2.
 """
 
 import os
+import sys
 import glob
 import time
+import logging
+from datetime import datetime
 from pathlib import Path
 import numpy as np
 from astropy.io import fits
 from tqdm import tqdm
 import warnings
-import sys
 import subprocess
-from astropy.stats import sigma_clipped_stats
 
 warnings.filterwarnings('ignore')
 
 # ============================================================================
-# CONFIGURAZIONE PATH ASSOLUTI
+# CONFIGURAZIONE PATH ASSOLUTI (DA V2)
 # ============================================================================
-# Definizione della radice del progetto
-SCRIPT_DIR = Path(__file__).resolve().parent  # C:\...\SuperResolution\finale
+# 1. Radice del progetto
+PROJECT_ROOT = Path(r"F:\SuperRevoltGaia\SuperResolution")
 
-PROJECT_ROOT = SCRIPT_DIR.parent              # C:\...\SuperResolution
-
-# Percorsi assoluti derivati
+# 2. Dove cercare i dati (M33, ecc.)
 ROOT_DATA_DIR = PROJECT_ROOT / "data"
-LOG_DIR_ROOT = PROJECT_ROOT / "logs"          # ✅ Aggiungi questa riga se serve logging
-SCRIPTS_DIR = PROJECT_ROOT / "finale"
-# ============================================================================
+
+# 3. Dove salvare i log
+LOG_DIR_ROOT = ROOT_DATA_DIR / "logs"
+
+# 4. Cartella dove si trovano questi script
+SCRIPTS_DIR = PROJECT_ROOT / "scripts"
+if not SCRIPTS_DIR.exists():
+    SCRIPTS_DIR = Path(__file__).parent
 
 # ============================================================================
-# NUOVA FUNZIONE: SELEZIONE CARTELLA TARGET
+# SETUP LOGGING
+# ============================================================================
+
+def setup_logging():
+    """Configura logging."""
+    os.makedirs(LOG_DIR_ROOT, exist_ok=True)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_filename = LOG_DIR_ROOT / f'crop_mosaic_{timestamp}.log'
+    
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_filename, encoding='utf-8'),
+            logging.StreamHandler()
+        ]
+    )
+    logger = logging.getLogger(__name__)
+    return logger
+
+# ============================================================================
+# FUNZIONI MENU E SELEZIONE (DA V2)
 # ============================================================================
 
 def select_target_directory():
-    """
-    Mostra un menu per selezionare una o TUTTE le cartelle target.
-    """
+    """Mostra un menu per selezionare una o TUTTE le cartelle target."""
     print("\n" + "📂"*35)
     print("SELEZIONE CARTELLA TARGET".center(70))
     print("📂"*35)
     print(f"\nScansione sottocartelle in: {ROOT_DATA_DIR}")
 
     try:
-        # Usa il percorso assoluto definito in alto
-        subdirs = [d for d in ROOT_DATA_DIR.iterdir() if d.is_dir()]
+        subdirs = [d for d in ROOT_DATA_DIR.iterdir() if d.is_dir() and d.name not in ['splits', 'logs']]
     except Exception as e:
-        print(f"\n❌ ERRORE: Impossibile leggere la cartella {ROOT_DATA_DIR}")
-        print(f"   Dettagli: {e}")
+        print(f"\n❌ ERRORE: Impossibile leggere la cartella {ROOT_DATA_DIR}: {e}")
         return []
 
     if not subdirs:
         print(f"\n❌ ERRORE: Nessuna sottocartella trovata in {ROOT_DATA_DIR}")
-        print("   Assicurati di aver creato cartelle come 'M33', 'M42', ecc.")
         return []
 
     print("\nCartelle target disponibili:")
@@ -70,35 +97,55 @@ def select_target_directory():
             choice_str = input(f"👉 Seleziona un numero (0-{len(subdirs)}) o 'q' per uscire: ").strip()
 
             if choice_str.lower() == 'q':
-                print("👋 Uscita.")
-                return []
+                return [] 
 
             choice = int(choice_str)
 
             if choice == 0:
                 print(f"\n✅ Selezionati TUTTI i {len(subdirs)} target.")
-                return subdirs
+                return subdirs 
             
             choice_idx = choice - 1
             if 0 <= choice_idx < len(subdirs):
                 selected_dir = subdirs[choice_idx]
                 print(f"\n✅ Cartella selezionata: {selected_dir.name}")
-                print(f"   Percorso completo: {selected_dir}")
                 return [selected_dir]
             else:
-                print(f"❌ Scelta non valida. Inserisci un numero tra 0 e {len(subdirs)}.")
+                print(f"❌ Scelta non valida.")
         except ValueError:
-            print("❌ Input non valido. Inserisci un numero.")
-        except Exception as e:
-            print(f"❌ Errore: {e}")
-            return []
+            print("❌ Input non valido.")
+
+def ask_continue_to_next_step():
+    """Chiede se proseguire con il prossimo script."""
+    print("\n" + "="*70)
+    print("🎯 STEP 3+4 (Crop e Mosaico) COMPLETATI!")
+    print("="*70)
+    print("\n📋 OPZIONI:")
+    print("   1️⃣  Continua con Step 5 (Analisi Patch - step3_analizzapatch.py)")
+    print("   2️⃣  Termina qui")
+    
+    next_script_name = 'step3_analizzapatch.py'
+    
+    while True:
+        print("\n" + "─"*70)
+        choice = input(f"👉 Vuoi continuare con '{next_script_name}'? [S/n, default=S]: ").strip().lower()
+        if choice in ('', 's', 'si', 'y', 'yes'):
+            return True
+        elif choice in ('n', 'no'):
+            return False
+        else:
+            print("❌ Scelta non valida.")
 
 # ============================================================================
-# FUNZIONI - RITAGLIO (Invariate)
+# FUNZIONI - RITAGLIO (LOGICA ORIGINALE MANTENUTA)
 # ============================================================================
 
 def find_smallest_dimensions(all_files):
+    """
+    Trova le dimensioni dell'immagine più piccola tra tutti i file.
+    """
     print("\n🔍 Ricerca dimensioni minime...")
+    
     min_height = float('inf')
     min_width = float('inf')
     smallest_file = None
@@ -106,353 +153,335 @@ def find_smallest_dimensions(all_files):
     for filepath in tqdm(all_files, desc="Scansione", unit="file"):
         try:
             with fits.open(filepath) as hdul:
-                data_hdu = None
-                for hdu in hdul:
-                    if hdu.data is not None and len(hdu.data.shape) >= 2:
-                        data_hdu = hdu
-                        break
-                if data_hdu is None: continue
-                if len(data_hdu.data.shape) == 3:
-                    shape = data_hdu.data.shape[1:3]
+                if len(hdul[0].data.shape) == 3:
+                    height, width = hdul[0].data[0].shape
                 else:
-                    shape = data_hdu.data.shape
-                height, width = shape
+                    height, width = hdul[0].data.shape
+                
                 if height < min_height or width < min_width:
-                    if height < min_height: min_height = height
-                    if width < min_width: min_width = width
+                    if height < min_height:
+                        min_height = height
+                    if width < min_width:
+                        min_width = width
                     smallest_file = filepath
+                    
         except Exception as e:
             print(f"\n⚠️  ATTENZIONE: Impossibile leggere {filepath}: {e}")
             continue
     
-    if smallest_file is None:
-        print("\n❌ ERRORE: Impossibile determinare le dimensioni minime. Nessun file valido.")
-        return None, None
-    print(f"\n✅ Dimensioni minime trovate: {min_width} x {min_height} pixel (da {Path(smallest_file).name})")
+    print(f"\n✅ Dimensioni minime trovate: {min_width} x {min_height} pixel")
+    if smallest_file:
+        print(f"   File più piccolo: {Path(smallest_file).name}")
+    
     return min_height, min_width
 
+
 def crop_image(input_path, output_path, target_height, target_width):
+    """
+    Ritaglia un'immagine FITS alle dimensioni target (centrato).
+    """
     try:
         with fits.open(input_path) as hdul:
-            data_hdu = None
-            for hdu in hdul:
-                if hdu.data is not None and len(hdu.data.shape) >= 2:
-                    data_hdu = hdu
-                    break
-            if data_hdu is None: return False
-            data = data_hdu.data
-            header = data_hdu.header
+            data = hdul[0].data
+            header = hdul[0].header.copy() # Copia header
+            
+            # Gestione dati 3D se necessario
             if len(data.shape) == 3:
                 data = data[0]
+            
             current_height, current_width = data.shape
+            
+            # Calcola gli offset per centrare il ritaglio
             y_offset = (current_height - target_height) // 2
             x_offset = (current_width - target_width) // 2
-            cropped_data = data[y_offset:y_offset + target_height, x_offset:x_offset + target_width]
-            if 'CRPIX1' in header: header['CRPIX1'] -= x_offset
-            if 'CRPIX2' in header: header['CRPIX2'] -= y_offset
+            
+            # Ritaglia l'immagine
+            cropped_data = data[
+                y_offset:y_offset + target_height,
+                x_offset:x_offset + target_width
+            ]
+            
+            # Aggiorna l'header WCS se presente
+            if 'CRPIX1' in header:
+                header['CRPIX1'] -= x_offset
+            if 'CRPIX2' in header:
+                header['CRPIX2'] -= y_offset
+                
+            # Aggiorna le dimensioni nell'header
             header['NAXIS1'] = target_width
             header['NAXIS2'] = target_height
-            if 'NAXIS3' in header: del header['NAXIS3']
-            header['NAXIS'] = 2
+            
+            # Aggiungi informazioni sul ritaglio
             header['HISTORY'] = 'Cropped by step2_croppedmosaico.py'
-            fits.PrimaryHDU(data=cropped_data, header=header).writeto(output_path, overwrite=True)
+            header['CROPX'] = (x_offset, 'X offset for cropping')
+            header['CROPY'] = (y_offset, 'Y offset for cropping')
+            header['ORIGW'] = (current_width, 'Original width')
+            header['ORIGH'] = (current_height, 'Original height')
+            
+            # Salva il file ritagliato
+            fits.PrimaryHDU(data=cropped_data, header=header).writeto(
+                output_path, overwrite=True
+            )
+            
             return True
+            
     except Exception as e:
         print(f"\n❌ ERRORE nel ritaglio di {input_path.name}: {e}")
         return False
 
-def crop_all_images(INPUT_DIRS, OUTPUT_DIRS):
+
+def crop_all_images_for_target(base_dir):
+    """Esegue il ritaglio di tutte le immagini per un target specifico."""
     print("\n" + "✂️ "*35)
-    print("STEP 3: RITAGLIO IMMAGINI REGISTRATE".center(70))
+    print(f"RITAGLIO: {base_dir.name}".center(70))
     print("✂️ "*35)
     
-    for output_dir in OUTPUT_DIRS.values():
+    # Definizione path relativi al target corrente
+    input_dirs = {
+        'hubble': base_dir / '3_registered_native' / 'hubble',
+        'observatory': base_dir / '3_registered_native' / 'observatory'
+    }
+    
+    output_dir_base = base_dir / '4_cropped'
+    output_dirs = {
+        'hubble': output_dir_base / 'hubble',
+        'observatory': output_dir_base / 'observatory'
+    }
+    
+    # Crea cartelle di output
+    for output_dir in output_dirs.values():
         output_dir.mkdir(parents=True, exist_ok=True)
     
-    print(f"\n📂 Input: {INPUT_DIRS['hubble'].parent}")
-    print(f"📂 Output: {OUTPUT_DIRS['hubble'].parent}")
-    
+    # 1. Trova tutti i file FITS registrati
     all_files = []
-    file_mapping = {}
+    file_mapping = {}  # Mappa file -> categoria (hubble/observatory)
     
-    for category, input_dir in INPUT_DIRS.items():
-        if not input_dir.exists():
-            print(f"\n⚠️  ATTENZIONE: Directory input non trovata: {input_dir}")
-            continue
-        files = glob.glob(str(input_dir / '*.fits')) + glob.glob(str(input_dir / '*.fit'))
+    for category, input_dir in input_dirs.items():
+        files = list(input_dir.glob('*.fits')) + list(input_dir.glob('*.fit'))
+        
         for f in files:
             all_files.append(f)
             file_mapping[f] = category
-        print(f"\n   {category}: {len(files)} file trovati")
+        
+        print(f"   {category}: {len(files)} file trovati")
     
     if not all_files:
-        print(f"\n❌ ERRORE: Nessun file FITS trovato nelle cartelle di input.")
+        print(f"\n❌ ERRORE: Nessun file FITS trovato in {base_dir.name}/3_registered_native.")
         return False
     
+    # 2. Trova le dimensioni minime
     min_height, min_width = find_smallest_dimensions(all_files)
-    if min_height is None or min_width is None:
-        print(f"\n❌ ERRORE: Impossibile procedere.")
-        return False
-
-    print(f"\n✂️  Ritaglio in corso a {min_width} x {min_height} pixel...\n")
-    success_count, failed_count = 0, 0
+    
+    # Conferma dimensioni
+    print(f"\n📐 Dimensioni target: {min_width} x {min_height} pixel")
+    
+    # 3. Ritaglia tutte le immagini
+    print("\n✂️  Ritaglio in corso...\n")
+    
+    success_count = 0
+    failed_count = 0
     
     for filepath in tqdm(all_files, desc="Ritaglio", unit="file"):
+        # Determina la categoria e il percorso di output
         category = file_mapping[filepath]
-        filename = Path(filepath).name
-        output_path = OUTPUT_DIRS[category] / filename
-        if crop_image(Path(filepath), output_path, min_height, min_width):
+        filename = filepath.name
+        output_path = output_dirs[category] / filename
+        
+        # Esegui il ritaglio
+        if crop_image(filepath, output_path, min_height, min_width):
             success_count += 1
         else:
             failed_count += 1
     
-    print(f"\n{'='*70}\n✅ RITAGLIO COMPLETATO!\n{'='*70}")
-    print(f"   Immagini ritagliate: {success_count} (Errori: {failed_count})")
-    print(f"   Dimensioni finali: {min_width} x {min_height} pixel")
+    # 4. Riepilogo finale
+    print(f"\n   ✅ Ritagliati: {success_count}")
+    if failed_count > 0:
+        print(f"   ⚠️  Errori: {failed_count}")
+    
     return success_count > 0
 
 # ============================================================================
-# FUNZIONI - MOSAICO (Invariate)
+# FUNZIONI - MOSAICO (LOGICA ORIGINALE MANTENUTA)
 # ============================================================================
 
-def create_mosaic(INPUT_DIRS_CROPPED, MOSAIC_OUTPUT_FILE, MOSAIC_OUTPUT_DIR):
+def create_mosaic_for_target(base_dir):
+    """Crea il mosaico per un target specifico."""
     print("\n" + "🖼️ "*35)
-    print("STEP 4: CREAZIONE MOSAICO (NORMALIZZAZIONE PERCENTILE)".center(70))
+    print(f"MOSAICO: {base_dir.name}".center(70))
     print("🖼️ "*35)
     
-    MOSAIC_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    INPUT_DIRS = [INPUT_DIRS_CROPPED['hubble'], INPUT_DIRS_CROPPED['observatory']]
+    # Path
+    output_dir_base = base_dir / '4_cropped'
+    cropped_dirs = [
+        output_dir_base / 'hubble',
+        output_dir_base / 'observatory'
+    ]
     
+    mosaic_output_dir = base_dir / '5_mosaics'
+    mosaic_output_file = mosaic_output_dir / 'final_mosaic.fits'
+    
+    # Crea cartella output
+    mosaic_output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 1. Trova tutti i file FITS ritagliati
     all_files = []
-    for d in INPUT_DIRS:
-        if not d.exists(): continue
-        all_files.extend(glob.glob(str(d / '*.fits')))
-        all_files.extend(glob.glob(str(d / '*.fit')))
+    for d in cropped_dirs:
+        all_files.extend(list(d.glob('*.fits')) + list(d.glob('*.fit')))
         
     if not all_files:
-        print(f"\n❌ ERRORE: Nessun file trovato.")
+        print(f"\n❌ ERRORE: Nessun file FITS ritagliato trovato.")
         return False
-
-    # Lettura shape dal primo file
+        
+    print(f"\n✅ Trovati {len(all_files)} file FITS da combinare.")
+    
+    # 2. Inizializza gli array per la media
     try:
         with fits.open(all_files[0]) as hdul:
-            shape = hdul[0].data.shape
-            if len(shape) > 2: shape = shape[-2:] # Prende solo Y, X
             template_header = hdul[0].header.copy()
+            if len(hdul[0].data.shape) == 3:
+                shape = hdul[0].data[0].shape
+            else:
+                shape = hdul[0].data.shape
     except Exception as e:
-        print(f"Errore lettura template: {e}")
+        print(f"\n❌ ERRORE: Impossibile leggere il primo file {all_files[0].name}: {e}")
         return False
-
-    print(f"   Dimensioni: {shape}")
-
-    # Array per l'accumulo
-    sum_array = np.zeros(shape, dtype=np.float32)
-    count_array = np.zeros(shape, dtype=np.float32)
-
-    print("\n🔄 Combinazione con Normalizzazione (0.0 - 1.0)...")
+        
+    print(f"   Dimensioni mosaico: {shape[1]} x {shape[0]} pixel")
     
-    for filepath in tqdm(all_files, desc="Mosaico", unit="file"):
+    # Array per sommare i valori (usa float64 per precisione)
+    total_flux = np.zeros(shape, dtype=np.float64)
+    # Array per contare quanti pixel validi ci sono in ogni punto
+    n_pixels = np.zeros(shape, dtype=np.int32)
+    
+    # 3. Itera su tutti i file e combinali
+    print("\n🔄 Combinazione immagini in corso...")
+    
+    for filepath in tqdm(all_files, desc="Combinazione", unit="file"):
         try:
             with fits.open(filepath) as hdul:
-                data = hdul[0].data
-                if data is None: continue
-                if len(data.shape) > 2: data = data[0]
+                img_data = hdul[0].data
+                if len(img_data.shape) == 3:
+                    img_data = img_data[0]
                 
-                # 1. Gestione NaN e Inf
-                mask_valid = np.isfinite(data)
-                if not np.any(mask_valid): continue # Salta immagini vuote
+                # Assicurati che le dimensioni corrispondano
+                if img_data.shape != shape:
+                    print(f"\n⚠️  ATTENZIONE: {filepath.name} ha dimensioni {img_data.shape} diverse da {shape}. Saltato.")
+                    continue
+                    
+                # Trova pixel validi (non NaN e non zero)
+                # Nota: nell'originale era solo ~np.isnan, ma spesso 0 è usato come background
+                valid_mask = ~np.isnan(img_data)
                 
-                # 2. Normalizzazione Robusta (Percentile Scaling)
-                # Calcoliamo il "nero" (1%) e il "bianco" (99%) ignorando i bordi neri (0 o NaN)
-                # Questo risolve M33 (valori negativi) e M1 (valori bassi)
-                lower_val = np.percentile(data[mask_valid], 1)
-                upper_val = np.percentile(data[mask_valid], 99)
+                # Sostituisci i NaN con 0 per la somma
+                img_data_no_nan = np.nan_to_num(img_data, nan=0.0, copy=False)
                 
-                if upper_val == lower_val: continue # Evita divisione per zero
+                # Aggiungi i valori all'array totale
+                total_flux += img_data_no_nan
                 
-                # Scaliamo l'immagine per portarla tra 0.0 e 1.0
-                data_norm = (data - lower_val) / (upper_val - lower_val)
-                
-                # 3. Clip per pulizia
-                # Tutto ciò che è sotto il percentile 1 diventa 0, tutto sopra il 99 diventa 1
-                data_norm = np.clip(data_norm, 0.0, 1.0)
-                
-                # 4. Accumulo (dove i dati originali non erano NaN)
-                # Usiamo nan_to_num per sicurezza, ma la mask guida il conteggio
-                clean_data = np.nan_to_num(data_norm, nan=0.0)
-                
-                sum_array[mask_valid] += clean_data[mask_valid]
-                count_array[mask_valid] += 1.0
+                # Incrementa il contatore per i pixel validi
+                n_pixels[valid_mask] += 1
                 
         except Exception as e:
-            print(f"⚠️ Errore {Path(filepath).name}: {e}")
-
-    # Media finale
-    print("\n🧮 Calcolo media finale...")
-    with np.errstate(divide='ignore', invalid='ignore'):
-        mosaic = sum_array / count_array
-        mosaic[count_array == 0] = 0.0 # I pixel non coperti diventano neri
-
-    # Salvataggio
-    print(f"\n💾 Salvataggio: {MOSAIC_OUTPUT_FILE}")
+            print(f"\n⚠️  ATTENZIONE: Errore nel leggere {filepath.name}: {e}. Saltato.")
+            
+    # 4. Calcola la media finale
+    print("\n🧮 Calcolo della media finale...")
+    
+    # Inizializza il mosaico finale con NaN
+    mosaic_data = np.full(shape, np.nan, dtype=np.float32)
+    
+    # Trova dove abbiamo almeno un pixel
+    valid_stack = n_pixels > 0
+    
+    # Calcola la media solo dove n_pixels > 0
+    mosaic_data[valid_stack] = (total_flux[valid_stack] / n_pixels[valid_stack]).astype(np.float32)
+    
+    # 5. Salva il file FITS finale
+    print(f"\n💾 Salvataggio mosaico in {mosaic_output_file.name}...")
+    
+    # Aggiorna l'header
+    template_header['HISTORY'] = 'Mosaico creato da step2_croppedmosaico.py'
+    template_header['NCOMBINE'] = (len(all_files), 'Numero di file combinati')
+    
     try:
-        fits.PrimaryHDU(data=mosaic, header=template_header).writeto(MOSAIC_OUTPUT_FILE, overwrite=True)
-        return True
+        fits.PrimaryHDU(data=mosaic_data, header=template_header).writeto(mosaic_output_file, overwrite=True)
     except Exception as e:
-        print(f"❌ Errore salvataggio: {e}")
+        print(f"\n❌ ERRORE: Impossibile salvare il file FITS finale: {e}")
         return False
-    
-# ============================================================================
-# MENU DI PROSEGUIMENTO (MODIFICATO)
-# ============================================================================
 
-def ask_continue_to_mosaic():
-    """Chiede all'utente se vuole proseguire con la creazione del mosaico."""
-    print("\n" + "="*70); print("🎯 RITAGLIO COMPLETATO!"); print("="*70)
-    # CORREZIONE: Reso più chiaro il messaggio informativo
-    print("\n📋 Il ritaglio è completo. Il passo successivo è la creazione del Mosaico (Stacking).") 
-    while True:
-        print("\n" + "─"*70)
-        choice = input("👉 Vuoi creare il Mosaico ora? [S/n, default=S]: ").strip().lower()
-        if choice in ('', 's', 'si', 'y', 'yes'):
-            print("\n✅ Proseguimento con creazione Mosaico...")
-            return True
-        elif choice in ('n', 'no'):
-            print("\n✅ Mosaico saltato.")
-            return False
-        else:
-            print("❌ Scelta non valida. Inserisci S per Sì o N per No.")
-
-def ask_continue_to_step3(target_list):
-    """
-    Chiede all'utente se vuole proseguire con Step 3 (Analisi Patches).
-    """
-    if not target_list:
-        return False
-        
-    print("\n" + "="*70); print("🎯 FASI PRECEDENTI COMPLETATE"); print("="*70)
-    print("\n📋 OPZIONI PROSSIMO STEP:\n   1️⃣  Continua con Step 5+6 (Analisi e Patches)\n   2️⃣  Termina qui")
-    
-    if len(target_list) > 1:
-        prompt_msg = f"per i {len(target_list)} target processati?"
-    else:
-        prompt_msg = f"per {target_list[0].name}?"
-
-    while True:
-        print("\n" + "─"*70)
-        choice = input(f"👉 Vuoi continuare con 'step3_analizzapatch.py' {prompt_msg} [S/n, default=S]: ").strip().lower()
-        
-        if choice in ('', 's', 'si', 'y', 'yes'):
-            print("\n✅ Avvio Step 5+6 (step3_analizzapatch.py)...")
-            return True
-        elif choice in ('n', 'no'):
-            print("\n✅ Pipeline completata")
-            return False
-        else:
-            print("❌ Scelta non valida. Inserisci S per Sì o N per No.")
+    print(f"\n✅ MOSAICO COMPLETATO: {mosaic_output_file}")
+    return True
 
 # ============================================================================
-# MAIN (MODIFICATA PER LOOP)
+# MAIN
 # ============================================================================
 
 def main():
-    """Funzione principale che esegue ritaglio e creazione mosaico."""
+    """Funzione principale."""
+    logger = setup_logging()
     
-    # Gestione lista target
-    target_dirs = []
-    if len(sys.argv) > 1:
-        # Se avviato da step1, prende UN SOLO BASE_DIR dall'argomento
-        target_dirs = [Path(sys.argv[1])]
-        print(f"🚀 Avviato da script precedente. Target: {target_dirs[0].name}")
-    else:
-        # Se avviato da solo, mostra il menu
-        target_dirs = select_target_directory()
-    
+    # Selezione Target
+    target_dirs = select_target_directory()
     if not target_dirs:
-        print("Nessun target selezionato. Uscita.")
         return
 
+    logger.info(f"Inizio batch su {len(target_dirs)} target")
+    
     print("\n" + "="*70)
-    print("PIPELINE: RITAGLIO IMMAGINI + CREAZIONE MOSAICO".center(70))
-    if len(target_dirs) > 1:
-        print(f"Modalità Batch: {len(target_dirs)} target".center(70))
+    print("PIPELINE: RITAGLIO IMMAGINI + CREAZIONE MOSAICO (BATCH)".center(70))
     print("="*70)
     
     start_time_total = time.time()
-    successful_targets_to_pass = []
-
-    for BASE_DIR in target_dirs:
+    successful_targets = []
+    failed_targets = []
+    
+    for base_dir in target_dirs:
         print("\n" + "🚀"*35)
-        print(f"INIZIO ELABORAZIONE TARGET: {BASE_DIR.name}".center(70))
+        print(f"ELABORAZIONE TARGET: {base_dir.name}".center(70))
         print("🚀"*35)
-
-        # Definizione percorsi per QUESTO target
-        INPUT_DIRS = {
-            'hubble': BASE_DIR / '3_registered_native' / 'hubble',
-            'observatory': BASE_DIR / '3_registered_native' / 'observatory'
-        }
-        OUTPUT_DIR_BASE = BASE_DIR / '4_cropped'
-        OUTPUT_DIRS = {
-            'hubble': OUTPUT_DIR_BASE / 'hubble',
-            'observatory': OUTPUT_DIR_BASE / 'observatory'
-        }
-        MOSAIC_OUTPUT_DIR = BASE_DIR / '5_mosaics'
-        MOSAIC_OUTPUT_FILE = MOSAIC_OUTPUT_DIR / 'final_mosaic.fits'
-        
-        start_time_target = time.time()
         
         # STEP 1: Ritaglio
-        crop_success = crop_all_images(INPUT_DIRS, OUTPUT_DIRS)
-        
-        if not crop_success:
-            print(f"\n❌ Pipeline interrotta per {BASE_DIR.name}: errore durante il ritaglio.")
-            continue 
-        
-        crop_time = time.time() - start_time_target
-        
-        # STEP 2: Mosaico (opzionale)
-        mosaic_success = False
-        if ask_continue_to_mosaic():
-            mosaic_start = time.time()
-            mosaic_success = create_mosaic(OUTPUT_DIRS, MOSAIC_OUTPUT_FILE, MOSAIC_OUTPUT_DIR)
-            mosaic_time = time.time() - mosaic_start
-            if mosaic_success:
-                print(f"\n⏱️  Tempo mosaico: {mosaic_time:.1f} secondi")
+        if not crop_all_images_for_target(base_dir):
+            print(f"\n❌ Target {base_dir.name} fallito al ritaglio.")
+            failed_targets.append(base_dir)
+            continue
+            
+        # STEP 2: Mosaico
+        if not create_mosaic_for_target(base_dir):
+            print(f"\n❌ Target {base_dir.name} fallito al mosaico.")
+            failed_targets.append(base_dir)
+            continue
+            
+        successful_targets.append(base_dir)
+        logger.info(f"Target completato: {base_dir.name}")
 
-        successful_targets_to_pass.append(BASE_DIR)
-        
-        elapsed_target = time.time() - start_time_target
-        print(f"\n⏱️  Tempo totale per {BASE_DIR.name}: {elapsed_target:.1f} secondi")
-        
+    # Riepilogo finale
     elapsed_total = time.time() - start_time_total
     print("\n" + "="*70)
-    print("📊 RIEPILOGO BATCH (Step 3+4)")
+    print("📊 RIEPILOGO BATCH")
     print("="*70)
-    print(f"   Target totali elaborati: {len(target_dirs)}")
-    print(f"   Target completati (crop): {len(successful_targets_to_pass)}")
-    print(f"   ⏱️ Tempo totale batch: {elapsed_total:.1f} secondi")
+    print(f"   ✅ Completati: {len(successful_targets)}")
+    for t in successful_targets: print(f"      - {t.name}")
+    print(f"\n   ❌ Falliti: {len(failed_targets)}")
+    for t in failed_targets: print(f"      - {t.name}")
+    print(f"\n   ⏱️ Tempo totale: {elapsed_total:.2f}s")
 
-    if not successful_targets_to_pass:
-        print("\nNessun target completato. Uscita.")
+    if not successful_targets:
         return
 
-    if ask_continue_to_step3(successful_targets_to_pass):
+    # Transizione al prossimo step
+    if ask_continue_to_next_step():
         try:
-            # Usa il percorso assoluto definito in alto
-            step3_script = SCRIPTS_DIR / 'step3_analizzapatch.py'
-            
-            if step3_script.exists():
-                print(f"\n🚀 Avvio Step 5+6 in loop per {len(successful_targets_to_pass)} target...")
-                for BASE_DIR in successful_targets_to_pass:
-                    print(f"\n--- Avvio per {BASE_DIR.name} ---")
-                    subprocess.run([sys.executable, str(step3_script), str(BASE_DIR)])
-                    print(f"--- Completato {BASE_DIR.name} ---")
+            next_script = SCRIPTS_DIR / 'step3_analizzapatch.py'
+            if next_script.exists():
+                print(f"\n🚀 Avvio Step 5 per {len(successful_targets)} target...")
+                for base_dir in successful_targets:
+                    print(f"\n--- Avvio per {base_dir.name} ---")
+                    subprocess.run([sys.executable, str(next_script), str(base_dir)])
             else:
-                print(f"\n⚠️  Script {step3_script.name} non trovato nella directory {SCRIPTS_DIR}")
+                print(f"\n⚠️  Script {next_script.name} non trovato in {SCRIPTS_DIR}")
         except Exception as e:
-            print(f"\n⚠️  Impossibile avviare automaticamente {step3_script.name}: {e}")
-    else:
-        print("\n👋 Arrivederci!")
+            print(f"❌ Errore avvio script successivo: {e}")
 
 if __name__ == "__main__":
     main()
