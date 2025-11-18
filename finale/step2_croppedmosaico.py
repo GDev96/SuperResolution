@@ -21,10 +21,13 @@ warnings.filterwarnings('ignore')
 # CONFIGURAZIONE PATH ASSOLUTI
 # ============================================================================
 # Definizione della radice del progetto
-PROJECT_ROOT = Path(r"F:\Super Revolt Gaia\SuperResolution")
+SCRIPT_DIR = Path(__file__).resolve().parent  # C:\...\SuperResolution\finale
+
+PROJECT_ROOT = SCRIPT_DIR.parent              # C:\...\SuperResolution
 
 # Percorsi assoluti derivati
 ROOT_DATA_DIR = PROJECT_ROOT / "data"
+LOG_DIR_ROOT = PROJECT_ROOT / "logs"          # ✅ Aggiungi questa riga se serve logging
 SCRIPTS_DIR = PROJECT_ROOT / "finale"
 # ============================================================================
 
