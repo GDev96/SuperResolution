@@ -328,50 +328,295 @@ def solve_file_with_astrometry(input_file, output_dir, logger):
         return {'status': 'error', 'file': input_file.name}
 
 def process_osservatorio_folder(input_dir, output_dir, logger):
-    """Processa local_raw con plate solving."""
+    """
+    Processa local_raw: estrae WCS da OBJCTRA/OBJCTDEC.
+    Fallback plate solving se metadati mancanti.
+    """
     fits_files = list(Path(input_dir).glob('**/*.fit')) + list(Path(input_dir).glob('**/*.fits'))
     
     if not fits_files:
         return 0, 0, None
     
-    # Scegli solver
-    if USE_ASTROMETRYNET and ASTROMETRYNET_SOLVE_FIELD.exists():
-        solve_func = solve_file_with_astrometry
-        solver_name = "Astrometry.net"
-    elif SIRIL_CLI_PATH.exists():
-        solve_func = solve_file_with_siril
-        solver_name = "Siril"
-    else:
-        logger.error("❌ Nessun plate solver disponibile!")
-        return 0, len(fits_files), None
-    
-    logger.info(f"Plate Solving ({solver_name}): {len(fits_files)} file")
+    logger.info(f"Observatory (local_raw): {len(fits_files)} file")
     
     prep, fail = 0, 0
     ra_list, dec_list, scale_list = [], [], []
+    created_from_metadata = 0
+    platesolve_success = 0
     
-    with ThreadPoolExecutor(max_workers=min(NUM_THREADS, 2)) as executor:
-        futures = {executor.submit(solve_func, f, output_dir, logger): f for f in fits_files}
+    # Verifica disponibilità plate solving
+    plate_solve_available = False
+    solve_func = None
+    solver_name = None
+    
+    if USE_ASTROMETRYNET and ASTROMETRYNET_SOLVE_FIELD.exists():
+        plate_solve_available = True
+        solve_func = solve_file_with_astrometry
+        solver_name = "Astrometry.net"
+    elif SIRIL_CLI_PATH.exists():
+        plate_solve_available = True
+        solve_func = solve_file_with_siril
+        solver_name = "Siril"
+    
+    def process_single_file(filepath):
+        """Processa singolo file: crea WCS da metadati o plate solving."""
+        nonlocal created_from_metadata, platesolve_success
         
-        with tqdm(total=len(fits_files), desc="  Plate Solving") as pbar:
-            for future in as_completed(futures):
-                result = future.result()
-                if result['status'] in ['success', 'solved']:
+        output_file = output_dir / f"{filepath.stem}_wcs.fits"
+        
+        # Skip se già processato
+        if output_file.exists():
+            logger.debug(f"⏭️  {filepath.name}: già elaborato")
+            return {'status': 'exists', 'file': filepath.name, 'output': output_file}
+        
+        # ============================================================
+        # METODO 1: CREA WCS DA OBJCTRA/OBJCTDEC
+        # ============================================================
+        try:
+            with fits.open(filepath) as hdul:
+                header = hdul[0].header
+                data = hdul[0].data
+                
+                if data is None:
+                    raise ValueError("Nessun dato nel file")
+                
+                # Estrai metadati essenziali
+                objctra = header.get('OBJCTRA')
+                objctdec = header.get('OBJCTDEC')
+                xpixsz = header.get('XPIXSZ')
+                ypixsz = header.get('YPIXSZ', xpixsz)
+                focallen = header.get('FOCALLEN', header.get('FOCAL'))
+                xbin = header.get('XBINNING', 1)
+                ybin = header.get('YBINNING', 1)
+                
+                # Verifica presenza coordinate
+                if not (objctra and objctdec):
+                    raise ValueError(f"Metadati WCS mancanti: OBJCTRA={objctra}, OBJCTDEC={objctdec}")
+                
+                # ============================================================
+                # CONVERSIONE COORDINATE RA/DEC
+                # ============================================================
+                try:
+                    # Metodo 1: Usa SkyCoord di Astropy
+                    # Formato atteso: "1 34 01" (ore minuti secondi) per RA
+                    #                 "30 39 57" (gradi arcmin arcsec) per DEC
+                    coord = SkyCoord(f"{objctra} {objctdec}", 
+                                   unit=(u.hourangle, u.deg))
+                    ra_deg = coord.ra.degree
+                    dec_deg = coord.dec.degree
+                    
+                    logger.debug(f"{filepath.name}: RA={ra_deg:.6f}°, DEC={dec_deg:.6f}°")
+                    
+                except Exception as coord_error:
+                    logger.warning(f"⚠️ {filepath.name}: parsing SkyCoord fallito, uso manuale")
+                    
+                    # Metodo 2: Parsing manuale
+                    ra_parts = str(objctra).split()
+                    dec_parts = str(objctdec).split()
+                    
+                    if len(ra_parts) != 3 or len(dec_parts) != 3:
+                        raise ValueError(f"Formato coordinate non valido: RA={objctra}, DEC={objctdec}")
+                    
+                    # Converti RA (ore -> gradi)
+                    h, m, s = map(float, ra_parts)
+                    ra_deg = (h + m/60.0 + s/3600.0) * 15.0
+                    
+                    # Converti DEC (gradi)
+                    d, arcm, arcs = map(float, dec_parts)
+                    sign = 1 if d >= 0 else -1
+                    dec_deg = d + sign * (abs(arcm)/60.0 + abs(arcs)/3600.0)
+                    
+                    logger.debug(f"{filepath.name}: Manual parse RA={ra_deg:.6f}°, DEC={dec_deg:.6f}°")
+                
+                # ============================================================
+                # CALCOLO PIXEL SCALE
+                # ============================================================
+                if xpixsz and focallen and focallen > 0:
+                    # Calcolo accurato
+                    pixel_size_mm = (xpixsz * xbin) / 1000.0
+                    pixel_scale_arcsec = 206.265 * pixel_size_mm / focallen
+                    logger.debug(f"{filepath.name}: Pixel scale calcolato: {pixel_scale_arcsec:.4f}\"/px "
+                               f"(focal={focallen}mm, pixel={xpixsz}μm, bin={xbin})")
+                elif focallen and focallen > 0:
+                    # Stima con pixel size tipico (12μm per Atik)
+                    pixel_size_mm = (12.0 * xbin) / 1000.0
+                    pixel_scale_arcsec = 206.265 * pixel_size_mm / focallen
+                    logger.warning(f"⚠️ {filepath.name}: XPIXSZ mancante, uso default 12μm -> {pixel_scale_arcsec:.4f}\"/px")
+                else:
+                    # Fallback completo (tipico setup amatoriale)
+                    pixel_scale_arcsec = 1.5
+                    logger.warning(f"⚠️ {filepath.name}: FOCALLEN=0 o mancante, uso scala default 1.5\"/px")
+                
+                pixel_scale_deg = pixel_scale_arcsec / 3600.0
+                
+                # ============================================================
+                # CREAZIONE WCS
+                # ============================================================
+                wcs = WCS(naxis=2)
+                height, width = data.shape
+                
+                # Centro immagine come reference pixel
+                wcs.wcs.crpix = [width / 2.0, height / 2.0]
+                
+                # Coordinate centro (da OBJCTRA/OBJCTDEC)
+                wcs.wcs.crval = [ra_deg, dec_deg]
+                
+                # Pixel scale (negativo per RA per convenzione FITS)
+                wcs.wcs.cdelt = [-pixel_scale_deg, pixel_scale_deg]
+                
+                # Proiezione
+                wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+                
+                # Sistema di riferimento
+                wcs.wcs.radesys = 'ICRS'
+                wcs.wcs.equinox = 2000.0
+                
+                # ============================================================
+                # SALVATAGGIO FILE CON WCS
+                # ============================================================
+                new_header = wcs.to_header()
+                
+                # Copia metadati originali importanti
+                preserve_keys = [
+                    'DATE-OBS', 'EXPOSURE', 'EXPTIME', 'FILTER', 
+                    'INSTRUME', 'OBSERVER', 'TELESCOP',
+                    'CCD-TEMP', 'GAIN', 'RDNOISE', 'PEDESTAL',
+                    'XBINNING', 'YBINNING', 'XPIXSZ', 'YPIXSZ',
+                    'FOCALLEN', 'APERTURE', 'SAT_LEVE',
+                    'SITELAT', 'SITELONG', 'FOCUSPOS',
+                    'OBJCTRA', 'OBJCTDEC'  # Mantieni coordinate originali
+                ]
+                
+                for key in preserve_keys:
+                    if key in header:
+                        try:
+                            new_header[key] = header[key]
+                        except:
+                            pass
+                
+                # Metadati aggiuntivi
+                new_header['ORIGINAL'] = filepath.name
+                new_header['WCSMETHO'] = ('OBJCTRA/OBJCTDEC', 'WCS creation method')
+                new_header['PREPDATE'] = datetime.now().isoformat()
+                new_header['PIXSCALE'] = (pixel_scale_arcsec, 'Pixel scale (arcsec/px)')
+                new_header['WCSCRA'] = (ra_deg, 'WCS center RA (deg)')
+                new_header['WCSCDEC'] = (dec_deg, 'WCS center DEC (deg)')
+                
+                # Salva
+                fits.PrimaryHDU(data=data, header=new_header).writeto(
+                    output_file, 
+                    overwrite=True, 
+                    output_verify='silentfix'
+                )
+                
+                created_from_metadata += 1
+                
+                logger.info(f"✅ {filepath.name}: WCS creato da metadati "
+                          f"(RA={ra_deg:.4f}°, DEC={dec_deg:.4f}°, scala={pixel_scale_arcsec:.2f}\"/px)")
+                
+                return {
+                    'status': 'success',
+                    'method': 'metadata',
+                    'file': filepath.name,
+                    'output': output_file,
+                    'ra': ra_deg,
+                    'dec': dec_deg,
+                    'scale': pixel_scale_arcsec
+                }
+                
+        except Exception as e:
+            logger.debug(f"⚠️ {filepath.name}: creazione WCS da metadati fallita: {e}")
+            
+            # ============================================================
+            # FALLBACK: PLATE SOLVING
+            # ============================================================
+            if plate_solve_available:
+                logger.debug(f"   → Tentativo plate solving con {solver_name}...")
+                
+                result = solve_func(filepath, output_dir, logger)
+                
+                if result['status'] == 'success':
+                    platesolve_success += 1
+                    
+                    # Estrai statistiche WCS
                     try:
                         with fits.open(result['output']) as hdul:
                             wcs = WCS(hdul[0].header)
-                            if wcs.has_celestial:
-                                ra, dec = wcs.wcs.crval
+                            ra, dec = wcs.wcs.crval
+                            
+                            if hasattr(wcs.wcs, 'cd') and wcs.wcs.cd is not None:
+                                scale = np.sqrt(wcs.wcs.cd[0,0]**2 + wcs.wcs.cd[0,1]**2) * 3600
+                            else:
                                 scale = abs(wcs.wcs.cdelt[0]) * 3600
-                                ra_list.append(ra)
-                                dec_list.append(dec)
-                                scale_list.append(scale)
-                        prep += 1
+                            
+                            return {
+                                'status': 'success',
+                                'method': 'platesolve',
+                                'file': filepath.name,
+                                'output': result['output'],
+                                'ra': ra,
+                                'dec': dec,
+                                'scale': scale
+                            }
                     except:
-                        fail += 1
+                        pass
+                    
+                    return result
+                else:
+                    logger.error(f"❌ {filepath.name}: tutti i metodi falliti")
+                    return {'status': 'error', 'file': filepath.name}
+            else:
+                logger.error(f"❌ {filepath.name}: plate solving non disponibile")
+                return {'status': 'error', 'file': filepath.name}
+    
+    # ============================================================
+    # PROCESSING PARALLELO
+    # ============================================================
+    with ThreadPoolExecutor(max_workers=NUM_THREADS) as executor:
+        futures = {executor.submit(process_single_file, f): f for f in fits_files}
+        
+        with tqdm(total=len(fits_files), desc="  Observatory") as pbar:
+            for future in as_completed(futures):
+                result = future.result()
+                
+                if result['status'] in ['success', 'exists']:
+                    # Raccogli statistiche
+                    if 'ra' in result and 'dec' in result and 'scale' in result:
+                        ra_list.append(result['ra'])
+                        dec_list.append(result['dec'])
+                        scale_list.append(result['scale'])
+                    else:
+                        # Rileggi dal file
+                        try:
+                            with fits.open(result['output']) as hdul:
+                                wcs = WCS(hdul[0].header)
+                                if wcs.has_celestial:
+                                    ra, dec = wcs.wcs.crval
+                                    
+                                    if hasattr(wcs.wcs, 'cd') and wcs.wcs.cd is not None:
+                                        scale = np.sqrt(wcs.wcs.cd[0,0]**2 + wcs.wcs.cd[0,1]**2) * 3600
+                                    else:
+                                        scale = abs(wcs.wcs.cdelt[0]) * 3600
+                                    
+                                    ra_list.append(ra)
+                                    dec_list.append(dec)
+                                    scale_list.append(scale)
+                        except:
+                            pass
+                    
+                    prep += 1
                 else:
                     fail += 1
+                
                 pbar.update(1)
+    
+    # ============================================================
+    # STATISTICHE FINALI
+    # ============================================================
+    print(f"   📊 Metodi usati:")
+    print(f"      ✓ WCS da metadati: {created_from_metadata}")
+    print(f"      ✓ Plate solving: {platesolve_success}")
+    print(f"   ✓ Processati: {prep}, ✗ Falliti: {fail}")
     
     stats = None
     if ra_list:
@@ -380,6 +625,14 @@ def process_osservatorio_folder(input_dir, output_dir, logger):
             'dec_range': (min(dec_list), max(dec_list)),
             'avg_scale': np.mean(scale_list)
         }
+        
+        logger.info(f"   Range RA: [{stats['ra_range'][0]:.4f}, {stats['ra_range'][1]:.4f}]°")
+        logger.info(f"   Range DEC: [{stats['dec_range'][0]:.4f}, {stats['dec_range'][1]:.4f}]°")
+        logger.info(f"   Scala media: {stats['avg_scale']:.2f}\"/px")
+        
+        print(f"   📍 Range RA: [{stats['ra_range'][0]:.4f}, {stats['ra_range'][1]:.4f}]°")
+        print(f"   📍 Range DEC: [{stats['dec_range'][0]:.4f}, {stats['dec_range'][1]:.4f}]°")
+        print(f"   📏 Scala media: {stats['avg_scale']:.2f}\"/px")
     
     return prep, fail, stats
 
