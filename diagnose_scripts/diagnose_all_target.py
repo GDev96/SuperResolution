@@ -5,6 +5,7 @@ Analizza:
 2. Mosaici finali (5_mosaics)
 3. Allineamento WCS tra tile
 4. Metadati e trasformazioni coordinate
+FIX: Aggiunta comparazione side-by-side Hubble vs Observatory
 """
 
 import numpy as np
@@ -13,11 +14,15 @@ from astropy.wcs import WCS
 from astropy.coordinates import SkyCoord
 import astropy.units as u
 from pathlib import Path
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.gridspec import GridSpec
+from matplotlib.colors import LogNorm
 
 ROOT_DATA = Path(r"c:\Users\fratt\Documents\GitHub\SuperResolution\data")
+OUTPUT_DIR = Path(__file__).parent  # Salva plot nella cartella diagnose_scripts
 
 # ============================================================================
 # ANALISI WCS E ALLINEAMENTO
@@ -43,13 +48,8 @@ def extract_wcs_corners(filepath):
             if not wcs.has_celestial:
                 return None
             
-            # 4 angoli + centro
             corners_pix = np.array([
-                [0, 0],           # Bottom-left
-                [nx-1, 0],        # Bottom-right
-                [0, ny-1],        # Top-left
-                [nx-1, ny-1],     # Top-right
-                [nx/2, ny/2]      # Center
+                [0, 0], [nx-1, 0], [0, ny-1], [nx-1, ny-1], [nx/2, ny/2]
             ])
             
             corners_world = wcs.pixel_to_world(corners_pix[:, 0], corners_pix[:, 1])
@@ -62,7 +62,6 @@ def extract_wcs_corners(filepath):
                 'center': (corners_world[4].ra.deg, corners_world[4].dec.deg)
             }
             
-            # Calcola pixel scale
             try:
                 if hasattr(wcs.wcs, 'cd') and wcs.wcs.cd is not None:
                     cd = wcs.wcs.cd
@@ -73,7 +72,6 @@ def extract_wcs_corners(filepath):
             except:
                 pixel_scale_arcsec = None
             
-            # Bounds
             all_ra = [corners['bl'][0], corners['br'][0], corners['tl'][0], corners['tr'][0]]
             all_dec = [corners['bl'][1], corners['br'][1], corners['tl'][1], corners['tr'][1]]
             
@@ -101,7 +99,6 @@ def check_alignment(wcs_info_list):
     if len(wcs_info_list) < 2:
         return {'status': 'SINGLE_IMAGE', 'overlap': None}
     
-    # Calcola overlap tra tutte le coppie
     overlaps = []
     
     for i in range(len(wcs_info_list)):
@@ -112,7 +109,6 @@ def check_alignment(wcs_info_list):
             bounds_a = info_a['bounds']
             bounds_b = info_b['bounds']
             
-            # Calcola overlap
             ra_overlap_min = max(bounds_a['ra_min'], bounds_b['ra_min'])
             ra_overlap_max = min(bounds_a['ra_max'], bounds_b['ra_max'])
             dec_overlap_min = max(bounds_a['dec_min'], bounds_b['dec_min'])
@@ -129,12 +125,11 @@ def check_alignment(wcs_info_list):
                 overlap_area = 0
                 overlap_pct = 0
             
-            # Distanza tra centri
             center_a = info_a['corners']['center']
             center_b = info_b['corners']['center']
             
-            delta_ra = (center_b[0] - center_a[0]) * 3600  # arcsec
-            delta_dec = (center_b[1] - center_a[1]) * 3600  # arcsec
+            delta_ra = (center_b[0] - center_a[0]) * 3600
+            delta_dec = (center_b[1] - center_a[1]) * 3600
             distance_arcsec = np.sqrt(delta_ra**2 + delta_dec**2)
             
             overlaps.append({
@@ -146,24 +141,22 @@ def check_alignment(wcs_info_list):
                 'delta_dec_arcsec': delta_dec
             })
     
-    # Analizza pattern
     total_overlaps = sum(1 for o in overlaps if o['has_overlap'])
     avg_distance = np.mean([o['distance_arcsec'] for o in overlaps])
     
-    # Diagnosi
     if total_overlaps == 0:
         status = 'NO_OVERLAP'
-        diagnosis = "❌ NESSUN OVERLAP: Immagini completamente separate!"
+        diagnosis = "❌ NESSUN OVERLAP"
     elif total_overlaps < len(overlaps):
         status = 'PARTIAL_OVERLAP'
-        diagnosis = "⚠️ OVERLAP PARZIALE: Alcune immagini non si sovrappongono"
+        diagnosis = "⚠️ OVERLAP PARZIALE"
     else:
-        if avg_distance < 100:  # < 100 arcsec
+        if avg_distance < 100:
             status = 'GOOD_ALIGNMENT'
             diagnosis = "✅ ALLINEAMENTO BUONO"
         else:
             status = 'POOR_ALIGNMENT'
-            diagnosis = f"⚠️ ALLINEAMENTO SCARSO: Distanza media {avg_distance:.1f} arcsec"
+            diagnosis = f"⚠️ ALLINEAMENTO SCARSO: {avg_distance:.1f}\""
     
     return {
         'status': status,
@@ -173,10 +166,6 @@ def check_alignment(wcs_info_list):
         'avg_distance': avg_distance
     }
 
-# ============================================================================
-# ANALISI DATI
-# ============================================================================
-
 def analyze_fits_detailed(filepath):
     """Analizza un file FITS in dettaglio."""
     try:
@@ -184,26 +173,19 @@ def analyze_fits_detailed(filepath):
             data = hdul[0].data
             header = hdul[0].header
             
-            # Gestisci 3D
             if data is None:
                 return None
             
             if len(data.shape) == 3:
                 data = data[0]
             
-            # Statistiche
             nan_mask = np.isnan(data)
             inf_mask = np.isinf(data)
             valid_data = data[~(nan_mask | inf_mask)]
             
             if valid_data.size == 0:
-                return {
-                    'status': 'ALL_NAN',
-                    'shape': data.shape,
-                    'nan_pct': 100.0
-                }
+                return {'status': 'ALL_NAN', 'shape': data.shape, 'nan_pct': 100.0}
             
-            # Calcola statistiche robuste
             stats = {
                 'status': 'OK',
                 'shape': data.shape,
@@ -223,30 +205,22 @@ def analyze_fits_detailed(filepath):
                 'negative_pct': (np.sum(valid_data < 0) / valid_data.size * 100)
             }
             
-            # Range dinamico
             if stats['min'] > 0:
                 stats['dyn_range'] = stats['max'] / stats['min']
             else:
                 stats['dyn_range'] = float('inf')
             
-            # Ratio importanti
             stats['max_mean_ratio'] = stats['max'] / stats['mean'] if stats['mean'] > 0 else float('inf')
             stats['p99_median_ratio'] = stats['p99'] / stats['median'] if stats['median'] > 0 else float('inf')
             
-            # Header info importanti
             stats['bunit'] = header.get('BUNIT', 'N/A')
             stats['exptime'] = header.get('EXPTIME', 'N/A')
             stats['filter'] = header.get('FILTER', 'N/A')
-            stats['nativesc'] = header.get('NATIVESC', 'N/A')
-            stats['regcov'] = header.get('REGCOV', 'N/A')
-            stats['normlow'] = header.get('NORMLOW', 'N/A')
-            stats['normhigh'] = header.get('NORMHIGH', 'N/A')
             stats['aligned'] = header.get('ALIGNED', False)
             stats['globcenr'] = header.get('GLOBCENR', 'N/A')
             stats['globcend'] = header.get('GLOBCEND', 'N/A')
             
-            # Controlla se è "binario" (pochi valori unici)
-            unique_values = len(np.unique(valid_data[:10000]))  # Sample più grande
+            unique_values = len(np.unique(valid_data[:10000]))
             stats['unique_sample'] = unique_values
             stats['likely_binary'] = (unique_values < 50)
             
@@ -277,7 +251,7 @@ def diagnose_target(target_dir):
         'alignment': None
     }
     
-    # === ANALISI WCS FILE REGISTRATI ===
+    # === ANALISI WCS ===
     print(f"\n{'─'*70}")
     print("🗺️  ANALISI WCS E ALLINEAMENTO")
     print(f"{'─'*70}")
@@ -287,7 +261,6 @@ def diagnose_target(target_dir):
     
     all_wcs_info = []
     
-    # Hubble
     if hubble_dir.exists():
         hubble_files = list(hubble_dir.glob('*.fits'))
         print(f"\n📂 Hubble: {len(hubble_files)} file")
@@ -302,18 +275,13 @@ def diagnose_target(target_dir):
                 
                 print(f"\n   📄 {filepath.name}")
                 print(f"      Centro: RA={wcs_info['crval'][0]:.6f}°, DEC={wcs_info['crval'][1]:.6f}°")
-                print(f"      CRPIX: [{wcs_info['crpix'][0]:.2f}, {wcs_info['crpix'][1]:.2f}]")
-                print(f"      Bounds: RA=[{wcs_info['bounds']['ra_min']:.6f}, {wcs_info['bounds']['ra_max']:.6f}]")
-                print(f"              DEC=[{wcs_info['bounds']['dec_min']:.6f}, {wcs_info['bounds']['dec_max']:.6f}]")
-                print(f"      Pixel Scale: {wcs_info['pixel_scale']:.4f}\"/px")
     
-    # Observatory
     if obs_dir.exists():
         obs_files = list(obs_dir.glob('*.fits'))
         if obs_files:
             print(f"\n📂 Observatory: {len(obs_files)} file")
             
-            for filepath in obs_files[:3]:  # Max 3 per non sovracaricare
+            for filepath in obs_files[:3]:
                 wcs_info = extract_wcs_corners(filepath)
                 if wcs_info:
                     wcs_info['file'] = filepath.name
@@ -335,46 +303,7 @@ def diagnose_target(target_dir):
         
         print(f"\n{alignment['diagnosis']}")
         print(f"   Overlap totali: {alignment['total_overlaps']}/{len(alignment['overlaps'])}")
-        print(f"   Distanza media centri: {alignment['avg_distance']:.1f} arcsec")
-        
-        # Dettagli overlap
-        for overlap in alignment['overlaps']:
-            file_a = Path(overlap['pair'][0]).stem[:30]
-            file_b = Path(overlap['pair'][1]).stem[:30]
-            
-            if overlap['has_overlap']:
-                print(f"\n   ✓ {file_a}")
-                print(f"     ↔ {file_b}")
-                print(f"     Overlap: {overlap['overlap_pct']:.1f}%")
-                print(f"     ΔRA: {overlap['delta_ra_arcsec']:.1f}\", ΔDEC: {overlap['delta_dec_arcsec']:.1f}\"")
-            else:
-                print(f"\n   ❌ {file_a}")
-                print(f"      ↔ {file_b}")
-                print(f"      NESSUN OVERLAP (distanza: {overlap['distance_arcsec']:.1f} arcsec)")
-    
-    # === ANALISI DATI ===
-    print(f"\n{'─'*70}")
-    print("📊 ANALISI QUALITÀ DATI")
-    print(f"{'─'*70}")
-    
-    # Hubble data
-    if hubble_dir.exists():
-        print(f"\n📂 Hubble - Qualità Dati")
-        for filepath in list(hubble_dir.glob('*.fits'))[:2]:  # Max 2
-            stats = analyze_fits_detailed(filepath)
-            
-            if stats and stats['status'] == 'OK':
-                results['hubble_data'].append({'file': filepath.name, 'stats': stats})
-                
-                print(f"\n   📄 {filepath.name}")
-                print(f"      Range: [{stats['min']:.3e}, {stats['max']:.3e}]")
-                print(f"      Median: {stats['median']:.3e}")
-                print(f"      p99/median: {stats['p99_median_ratio']:.1f}")
-                print(f"      Unique values (sample): {stats['unique_sample']}")
-                print(f"      ALIGNED={stats['aligned']}, GLOBCENR={stats['globcenr']}, GLOBCEND={stats['globcend']}")
-                
-                if stats['likely_binary']:
-                    print(f"      ⚠️  BINARIO RILEVATO!")
+        print(f"   Distanza media: {alignment['avg_distance']:.1f} arcsec")
     
     # === ANALISI MOSAICO ===
     mosaic_path = target_dir / '5_mosaics' / 'final_mosaic.fits'
@@ -387,25 +316,150 @@ def diagnose_target(target_dir):
         
         if stats and stats['status'] == 'OK':
             results['mosaic'] = stats
-            
             print(f"\n   Range: [{stats['min']:.3e}, {stats['max']:.3e}]")
             print(f"   Median: {stats['median']:.3e}")
-            print(f"   p99/median: {stats['p99_median_ratio']:.1f}")
-            print(f"   Unique values: {stats['unique_sample']}")
-            
-            if stats['likely_binary']:
-                print(f"\n   ❌ MOSAICO BINARIO!")
-            else:
-                print(f"\n   ✅ Mosaico OK")
+            print(f"   {'✅ OK' if not stats['likely_binary'] else '❌ BINARIO'}")
     
     return results
 
 # ============================================================================
-# CONFRONTO E VISUALIZZAZIONE
+# VISUALIZZAZIONE COMPARATIVA
 # ============================================================================
 
+def create_comparison_plot(results):
+    """
+    Crea plot comparativo completo per un target.
+    Layout: 3 colonne x N righe (Hubble tiles, Observatory tiles, Mosaico finale)
+    """
+    target = results['target']
+    target_dir = ROOT_DATA / target
+    
+    # Conta file disponibili
+    hubble_files = list((target_dir / '3_registered_native' / 'hubble').glob('*.fits'))
+    obs_files = list((target_dir / '3_registered_native' / 'observatory').glob('*.fits'))
+    mosaic_file = target_dir / '5_mosaics' / 'final_mosaic.fits'
+    
+    has_mosaic = mosaic_file.exists()
+    
+    # Determina layout
+    n_hubble = len(hubble_files)
+    n_obs = len(obs_files)
+    n_rows = max(n_hubble, n_obs, 1 if has_mosaic else 0)
+    
+    if n_rows == 0:
+        print(f"   ⏭️  {target}: Nessun file da visualizzare")
+        return
+    
+    # Crea figura
+    fig = plt.figure(figsize=(18, 6*n_rows))
+    gs = GridSpec(n_rows, 3, figure=fig, hspace=0.3, wspace=0.2)
+    
+    # Funzione helper per caricare e normalizzare
+    def load_and_normalize(filepath):
+        with fits.open(filepath) as hdul:
+            data = hdul[0].data
+            if len(data.shape) == 3:
+                data = data[0]
+            
+            valid = np.isfinite(data) & (data > 0)
+            if not valid.any():
+                return data, 0, 1
+            
+            vmin = np.percentile(data[valid], 1)
+            vmax = np.percentile(data[valid], 99.9)
+            return data, vmin, vmax
+    
+    # === COLONNA 1: HUBBLE ===
+    for i, filepath in enumerate(hubble_files[:n_rows]):
+        ax = fig.add_subplot(gs[i, 0])
+        try:
+            data, vmin, vmax = load_and_normalize(filepath)
+            ax.imshow(data, origin='lower', cmap='gray', vmin=vmin, vmax=vmax, interpolation='none')
+            ax.set_title(f'Hubble #{i+1}\n{filepath.stem[:40]}', fontsize=10)
+        except Exception as e:
+            ax.text(0.5, 0.5, f'Error loading\n{filepath.name}', 
+                   ha='center', va='center', fontsize=10, color='red')
+        ax.axis('off')
+    
+    # Riempi celle vuote
+    for i in range(n_hubble, n_rows):
+        ax = fig.add_subplot(gs[i, 0])
+        ax.text(0.5, 0.5, 'No data', ha='center', va='center', fontsize=14, color='gray')
+        ax.axis('off')
+    
+    # === COLONNA 2: OBSERVATORY ===
+    for i, filepath in enumerate(obs_files[:n_rows]):
+        ax = fig.add_subplot(gs[i, 1])
+        try:
+            data, vmin, vmax = load_and_normalize(filepath)
+            ax.imshow(data, origin='lower', cmap='gray', vmin=vmin, vmax=vmax, interpolation='none')
+            ax.set_title(f'Observatory #{i+1}\n{filepath.stem[:40]}', fontsize=10)
+        except Exception as e:
+            ax.text(0.5, 0.5, f'Error loading\n{filepath.name}', 
+                   ha='center', va='center', fontsize=10, color='red')
+        ax.axis('off')
+    
+    # Riempi celle vuote
+    for i in range(n_obs, n_rows):
+        ax = fig.add_subplot(gs[i, 1])
+        ax.text(0.5, 0.5, 'No data', ha='center', va='center', fontsize=14, color='gray')
+        ax.axis('off')
+    
+    # === COLONNA 3: MOSAICO (span tutte le righe) ===
+    if has_mosaic:
+        ax = fig.add_subplot(gs[:, 2])
+        try:
+            data, vmin, vmax = load_and_normalize(mosaic_file)
+            
+            im = ax.imshow(data, origin='lower', cmap='gray', vmin=vmin, vmax=vmax, interpolation='none')
+            ax.set_title(f'Final Mosaic\n({data.shape[1]}x{data.shape[0]} px)', fontsize=12, fontweight='bold')
+            ax.axis('off')
+            
+            # Colorbar
+            cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            cbar.set_label('Intensity', fontsize=10)
+            
+            # Statistiche
+            stats = results.get('mosaic')
+            if stats:
+                stats_text = (
+                    f"Range: [{stats['min']:.2e}, {stats['max']:.2e}]\n"
+                    f"Median: {stats['median']:.2e}\n"
+                    f"p99/med: {stats['p99_median_ratio']:.1f}\n"
+                    f"Status: {'✅ OK' if not stats['likely_binary'] else '❌ Binary'}"
+                )
+                ax.text(0.02, 0.98, stats_text, transform=ax.transAxes,
+                       fontsize=9, verticalalignment='top',
+                       bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        except Exception as e:
+            ax.text(0.5, 0.5, f'Error loading mosaic\n{str(e)}', 
+                   ha='center', va='center', fontsize=12, color='red')
+            ax.axis('off')
+    else:
+        # Nessun mosaico: mostra messaggio
+        ax = fig.add_subplot(gs[:, 2])
+        ax.text(0.5, 0.5, 'No mosaic available', ha='center', va='center', 
+               fontsize=14, color='gray')
+        ax.axis('off')
+    
+    # Titolo generale - FIX: gestione alignment None
+    alignment = results.get('alignment')
+    if alignment and isinstance(alignment, dict):
+        alignment_status = alignment.get('diagnosis', 'N/A')
+    else:
+        alignment_status = 'Singola immagine (nessun allineamento richiesto)'
+    
+    fig.suptitle(f'{target} - Comparazione Completa\nAllineamento: {alignment_status}', 
+                fontsize=16, fontweight='bold', y=0.995)
+    
+    # Salva
+    output_path = OUTPUT_DIR / f'{target}_comparison.png'
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    print(f"\n💾 Comparazione salvata: {output_path}")
+    plt.close()
+
 def plot_wcs_alignment(results):
-    """Crea plot dell'allineamento WCS."""
+    """Plot allineamento WCS."""
     target = results['target']
     all_wcs = results['hubble_wcs'] + results['obs_wcs']
     
@@ -421,16 +475,14 @@ def plot_wcs_alignment(results):
         source = wcs_info['source']
         color = colors_map.get(source, 'gray')
         
-        # Disegna box
         ra_vals = [corners['bl'][0], corners['br'][0], corners['tr'][0], corners['tl'][0], corners['bl'][0]]
         dec_vals = [corners['bl'][1], corners['br'][1], corners['tr'][1], corners['tl'][1], corners['bl'][1]]
         
-        ax.plot(ra_vals, dec_vals, color=color, linewidth=2, label=source if source not in [l.get_label() for l in ax.get_lines()] else "")
+        ax.plot(ra_vals, dec_vals, color=color, linewidth=2, 
+               label=source if source not in [l.get_label() for l in ax.get_lines()] else "")
         
-        # Marca centro
         ax.plot(corners['center'][0], corners['center'][1], 'o', color=color, markersize=8)
         
-        # Nome file abbreviato
         short_name = Path(wcs_info['file']).stem[:15]
         ax.text(corners['center'][0], corners['center'][1], short_name, 
                fontsize=8, ha='center', va='bottom', color=color)
@@ -440,102 +492,69 @@ def plot_wcs_alignment(results):
     ax.set_title(f'{target} - Allineamento WCS')
     ax.legend()
     ax.grid(True, alpha=0.3)
-    ax.invert_xaxis()  # RA decresce verso destra
+    ax.invert_xaxis()
     
     plt.tight_layout()
-    plt.savefig(f'{target}_wcs_alignment.png', dpi=150, bbox_inches='tight')
-    print(f"\n💾 Plot WCS salvato: {target}_wcs_alignment.png")
+    output_path = OUTPUT_DIR / f'{target}_wcs_alignment.png'
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    print(f"💾 WCS alignment: {output_path}")
     plt.close()
 
 def create_diagnostic_summary(all_results):
-    """Crea summary completo con tutti i target."""
+    """Riepilogo finale."""
     print(f"\n{'='*70}")
     print("📋 RIEPILOGO DIAGNOSTICA")
     print(f"{'='*70}")
     
     for result in all_results:
         target = result['target']
-        
         print(f"\n🎯 {target}")
+        
+        # Conteggio file
+        n_hubble = len(result['hubble_wcs'])
+        n_obs = len(result['obs_wcs'])
+        print(f"   File registrati: Hubble={n_hubble}, Observatory={n_obs}")
         
         # Allineamento
         if result['alignment']:
-            align = result['alignment']
-            print(f"   WCS: {align['diagnosis']}")
-            
-            if align['status'] in ['NO_OVERLAP', 'POOR_ALIGNMENT']:
-                print(f"   ⚠️  PROBLEMA ALLINEAMENTO RILEVATO!")
-                print(f"       → File registrati ma NON allineati nello stesso frame")
-                print(f"       → Causa: reproject_image_native() crea WCS diversi per ogni file")
+            print(f"   Allineamento: {result['alignment']['diagnosis']}")
         
-        # Dati
-        mosaic = result.get('mosaic')
-        if mosaic:
-            if mosaic.get('likely_binary'):
-                print(f"   Dati: ❌ BINARIO ({mosaic['unique_sample']} valori)")
-            else:
-                print(f"   Dati: ✅ OK (range dinamico corretto)")
-    
-    # === DIAGNOSI FINALE ===
-    print(f"\n{'='*70}")
-    print("💡 DIAGNOSI FINALE")
-    print(f"{'='*70}")
-    
-    # Conta problemi
-    alignment_issues = sum(1 for r in all_results if r.get('alignment') and r['alignment']['status'] in ['NO_OVERLAP', 'POOR_ALIGNMENT'])
-    binary_issues = sum(1 for r in all_results if r.get('mosaic') and r['mosaic'].get('likely_binary'))
-    
-    if alignment_issues > 0:
-        print(f"\n❌ PROBLEMA PRINCIPALE: ALLINEAMENTO WCS")
-        print(f"   {alignment_issues} target con allineamento errato")
-        print(f"\n🔧 CAUSA:")
-        print(f"   • reproject_image_native() crea un WCS TARGET diverso per ogni immagine")
-        print(f"   • Ogni file ha: target_wcs.wcs.crval = wcs_orig.wcs.crval  (linea ~688)")
-        print(f"   • Risultato: file con centri diversi non si sovrappongono nel mosaico")
-        print(f"\n💡 SOLUZIONE:")
-        print(f"   • Implementare register_to_unified_frame() come nell'ultimo fix")
-        print(f"   • Calcolare UN SOLO frame WCS globale per tutto il gruppo")
-        print(f"   • Reproiettare TUTTE le immagini in quel frame condiviso")
-    
-    if binary_issues > 0:
-        print(f"\n❌ PROBLEMA SECONDARIO: DATI BINARI")
-        print(f"   {binary_issues} target con dati binarizzati")
-        print(f"\n🔧 CAUSA:")
-        print(f"   • Normalizzazione/denormalizzazione errata durante reproiezione")
-        print(f"\n💡 SOLUZIONE:")
-        print(f"   • Già implementata con fix MIN_RANGE_THRESHOLD = 0.01")
-        print(f"   • Verificare che NORMLOW/NORMHIGH siano corretti nell'header")
+        # Mosaico
+        if result.get('mosaic'):
+            mosaic = result['mosaic']
+            status = '✅ OK' if not mosaic.get('likely_binary') else '❌ BINARIO'
+            print(f"   Mosaico: {status}")
 
 def main():
     """Funzione principale."""
     print("="*70)
-    print("🔬 DIAGNOSTICA COMPLETA: WCS + ALLINEAMENTO + DATI".center(70))
+    print("🔬 DIAGNOSTICA COMPLETA + COMPARAZIONE".center(70))
     print("="*70)
     
-    # Trova tutti i target
     target_dirs = [d for d in ROOT_DATA.iterdir() if d.is_dir() and d.name.startswith('M')]
     
     if not target_dirs:
-        print(f"\n❌ Nessun target trovato in {ROOT_DATA}")
+        print(f"\n❌ Nessun target in {ROOT_DATA}")
         return
     
-    print(f"\n📂 Trovati {len(target_dirs)} target: {[d.name for d in target_dirs]}")
+    print(f"\n📂 Target: {[d.name for d in target_dirs]}")
     
-    # Analizza tutti
     all_results = []
     for target_dir in sorted(target_dirs):
         result = diagnose_target(target_dir)
         all_results.append(result)
         
-        # Plot WCS alignment
+        # Plot WCS
         if len(result['hubble_wcs']) + len(result['obs_wcs']) >= 2:
             plot_wcs_alignment(result)
+        
+        # Plot comparazione
+        create_comparison_plot(result)
     
-    # Summary finale
     create_diagnostic_summary(all_results)
     
     print(f"\n{'='*70}")
-    print("✅ DIAGNOSTICA COMPLETATA")
+    print(f"✅ File salvati in: {OUTPUT_DIR}")
     print(f"{'='*70}")
 
 if __name__ == "__main__":
