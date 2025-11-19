@@ -16,16 +16,14 @@ from astropy.wcs import WCS
 from astropy.coordinates import SkyCoord
 
 warnings.filterwarnings('ignore')
+
 # ============================================================================
-# CONFIGURAZIONE PATH DINAMICI (UNIVERSALI)
+# CONFIGURAZIONE PATH DINAMICI (ASSOLUTI - Identici a Step 1 e 2)
 # ============================================================================
 CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
-
-# Risale alla cartella principale del progetto (es. .../SuperResolution)
 PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
-
-LOG_DIR = PROJECT_ROOT / "logs"
-# ============================================================================
+ROOT_DATA_DIR = PROJECT_ROOT / "data"
+LOG_DIR = ROOT_DATA_DIR / "logs"
 # ============================================================================
 
 TARGET_FOV = 1 # Arcmin
@@ -40,18 +38,21 @@ def extract_patches(f, d_out, prefix):
             w = WCS(head)
             if not w.has_celestial: return []
             
-            scale = np.sqrt(w.wcs.cd[0,0]**2 + w.wcs.cd[0,1]**2) if hasattr(w.wcs, 'cd') else abs(w.wcs.cdelt[0])
+            # Calcolo scala pixel robusta
+            if hasattr(w.wcs, 'cd'):
+                scale = np.sqrt(w.wcs.cd[0,0]**2 + w.wcs.cd[0,1]**2)
+            else:
+                scale = abs(w.wcs.cdelt[0])
+                
             # Calcolo dimensione in pixel per 1 arcmin
             ps = int((TARGET_FOV/60)/scale)
-            # Arrotonda a multiplo di 8
-            ps = ((ps+7)//8)*8
+            ps = ((ps+7)//8)*8 # Multiplo di 8
             step = int(ps * (1 - OVERLAP/100))
             
             ny, nx = d.shape
             for y in range(0, ny-ps+1, step):
                 for x in range(0, nx-ps+1, step):
                     p_data = d[y:y+ps, x:x+ps]
-                    # Scarta se troppi NaN
                     if np.isnan(p_data).mean() > 0.5: continue
                     
                     c = w.pixel_to_world(x+ps/2, y+ps/2)
@@ -65,12 +66,19 @@ def extract_patches(f, d_out, prefix):
     except: return []
 
 def main():
+    # Controllo argomento in ingresso (per automazione)
     if len(sys.argv) < 2: 
-        print("⚠️ Questo script deve essere chiamato da step2 o con un argomento path.")
-        # Fallback per test manuale
+        print("⚠️  Questo script richiede il percorso del target come argomento.")
+        print(f"   Esempio: python {sys.argv[0]} /path/to/data/M33")
         return
 
-    BASE = Path(sys.argv[1])
+    # Conversione sicura in Path assoluto
+    BASE = Path(sys.argv[1]).resolve()
+    
+    if not BASE.exists():
+        print(f"❌ Errore: La cartella {BASE} non esiste.")
+        return
+
     print(f"\n🚀 Patching {BASE.name}...")
     
     # Input: Immagini croppate
@@ -84,6 +92,7 @@ def main():
     
     H_patches, O_patches = [], []
     
+    # Estrazione Patch
     with ThreadPoolExecutor(4) as exc:
         f_h = [exc.submit(extract_patches, f, OUT/'hubble_patches', 'hr') for f in IN_H.glob('*.fits')]
         f_o = [exc.submit(extract_patches, f, OUT/'observatory_patches', 'lr') for f in IN_O.glob('*.fits')]
@@ -118,5 +127,4 @@ def main():
     print(f"✅ Create {len(pairs)} coppie.")
 
 if __name__ == "__main__":
-    import shutil
     main()

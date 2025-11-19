@@ -4,6 +4,7 @@ Combina Step 1 (Conversione WCS) e Step 2 (Registrazione) in un unico script.
 Gli output dei due step rimangono separati e distinti.
 Tutti i metodi sono mantenuti ESATTAMENTE come negli script originali.
 MODIFICATO: Integra gestione path dinamici e menu selezione da v1.
+Aggiornato per chiamare step2_mosaico_1_33.py
 """
 
 import os
@@ -139,15 +140,19 @@ def ask_continue_to_cropping():
     print("\n📋 OPZIONI:")
     print("   1️⃣  Continua con Step 3+4 (Ritaglio e Mosaico)")
     print("   2️⃣  Termina qui")
+    
+    # MODIFICATO: Nome del nuovo file
+    next_script_name = 'step2_mosaico_1_33.py'
+    
     while True:
         print("\n" + "─"*70)
-        choice = input("👉 Vuoi continuare con 'step2_croppedmosaico.py'? [S/n, default=S]: ").strip().lower()
+        choice = input(f"👉 Vuoi continuare con '{next_script_name}'? [S/n, default=S]: ").strip().lower()
         if choice in ('', 's', 'si', 'y', 'yes'):
-            print("\n✅ Avvio Step 3+4 (step2_croppedmosaico.py)...")
+            print(f"\n✅ Avvio Step 3+4 ({next_script_name})...")
             return True
         elif choice in ('n', 'no'):
             print("\n✅ Pipeline interrotta")
-            print("   Per eseguire Step 3+4 in seguito, esegui 'step2_croppedmosaico.py'")
+            print(f"   Per eseguire Step 3+4 in seguito, esegui '{next_script_name}'")
             return False
         else:
             print("❌ Scelta non valida. Inserisci S per Sì o N per No.")
@@ -1166,11 +1171,11 @@ def main():
         print("\n❌ Nessun target completato con successo.")
         return
 
-    # TRANSIZIONE AI PROSSIMI SCRIPT (da v1)
+    # TRANSIZIONE AI PROSSIMI SCRIPT (MODIFICATA)
     if ask_continue_to_cropping():
         try:
-            # Usa la cartella dinamica degli script
-            next_script = SCRIPTS_DIR / 'step2_croppedmosaico.py'
+            # MODIFICATO: Usa il nuovo nome file
+            next_script = SCRIPTS_DIR / 'step2_mosaico_1_33.py'
             
             if next_script.exists():
                 print(f"\n🚀 Avvio Step 3+4 in loop per {len(successful_targets)} target...")
