@@ -41,7 +41,7 @@ PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
 ROOT_DATA_DIR = PROJECT_ROOT / "data"
 
 # 4. Dove salvare i log
-LOG_DIR_ROOT = ROOT_DATA_DIR / "logs"
+LOG_DIR_ROOT = "logs"
 
 # 5. Cartella script (uguale alla directory corrente)
 SCRIPTS_DIR = CURRENT_SCRIPT_DIR
@@ -55,6 +55,13 @@ MIN_RANGE_THRESHOLD = 0.01            # Range minimo dati (max-min)
 PERCENTILE_LOW = 1.0                  # Percentile basso per clipping
 PERCENTILE_HIGH = 99.0                # Percentile alto per clipping
 
+# ============================================================================
+
+# ============================================================================
+# CONFIGURAZIONE PLATE SOLVING SIRIL
+# ============================================================================
+SIRIL_CLI_PATH = Path("C:/Program Files/Siril/bin/siril-cli.exe")
+PLATE_SOLVE_TIMEOUT = 300  # secondi per file
 # ============================================================================
 
 print(f"📂 Project Root rilevata: {PROJECT_ROOT}")
@@ -459,17 +466,105 @@ def extract_lith_data(filename, logger):
         logger.error(f"✗ {os.path.basename(filename)}: {e}")
         return None, None, None
 
+def solve_file_with_siril(input_file, output_dir, logger):
+    """
+    Esegue plate solving su un singolo file con Siril CLI.
+    
+    Args:
+        input_file: Path al file FITS da risolvere
+        output_dir: Directory output
+        logger: Logger
+    
+    Returns:
+        dict con status e percorso file risolto
+    """
+    try:
+        filename = input_file.name
+        name_no_ext = input_file.stem
+        output_file = output_dir / f"{name_no_ext}_wcs.fits"
+        
+        # Se esiste già, skippa
+        if output_file.exists():
+            with log_lock:
+                logger.info(f"⏭️  {filename}: WCS già presente, skip")
+            return {'status': 'solved', 'file': filename, 'output': output_file}
+        
+        # Comando Siril per plate solving
+        # Sintassi: siril-cli -s "platesolve <input> -out=<output> -catalogue=nomad"
+        cmd = [
+            str(SIRIL_CLI_PATH),
+            "-s",
+            f'platesolve "{input_file}" -out="{output_file}" -catalogue=nomad -force'
+        ]
+        
+        with log_lock:
+            logger.debug(f"🔍 {filename}: Comando Siril: {' '.join(cmd)}")
+        
+        # Esegui Siril
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=PLATE_SOLVE_TIMEOUT,
+            cwd=input_file.parent  # Working directory
+        )
+        
+        # Verifica successo
+        if result.returncode == 0 and output_file.exists():
+            # Verifica WCS valido
+            try:
+                with fits.open(output_file) as hdul:
+                    wcs = WCS(hdul[0].header)
+                    if wcs.has_celestial:
+                        with log_lock:
+                            logger.info(f"✅ {filename}: Plate solving completato")
+                        return {'status': 'success', 'file': filename, 'output': output_file}
+            except Exception as e:
+                with log_lock:
+                    logger.error(f"❌ {filename}: WCS non valido dopo solve: {e}")
+                if output_file.exists():
+                    output_file.unlink()
+                return {'status': 'error', 'file': filename, 'reason': 'Invalid WCS'}
+        
+        # Fallimento
+        with log_lock:
+            logger.error(f"❌ {filename}: Plate solving fallito")
+            logger.debug(f"   stdout: {result.stdout[:200]}")
+            logger.debug(f"   stderr: {result.stderr[:200]}")
+        
+        return {'status': 'error', 'file': filename, 'reason': 'Siril failed'}
+        
+    except subprocess.TimeoutExpired:
+        with log_lock:
+            logger.error(f"⏱️  {filename}: Timeout ({PLATE_SOLVE_TIMEOUT}s)")
+        return {'status': 'error', 'file': filename, 'reason': 'Timeout'}
+    
+    except Exception as e:
+        with log_lock:
+            logger.error(f"❌ {filename}: {e}")
+        return {'status': 'error', 'file': filename, 'reason': str(e)}
+
 
 def process_osservatorio_folder(input_dir, output_dir, logger):
-    """Processa osservatorio convertendo coordinate in WCS."""
-    # Modificato per cercare ricorsivamente in tutte le sottocartelle
+    """
+    Processa osservatorio con PLATE SOLVING (Siril CLI).
+    FIX: Aggiunto plate solving reale invece di solo conversione coordinate.
+    """
     fits_files = list(Path(input_dir).glob('**/*.fit')) + list(Path(input_dir).glob('**/*.fits'))
     
     if not fits_files:
         logger.warning(f"Nessun file in {input_dir}")
         return 0, 0, None
     
-    logger.info(f"Trovati {len(fits_files)} file osservatorio")
+    # Verifica Siril installato
+    if not SIRIL_CLI_PATH.exists():
+        logger.error(f"❌ Siril CLI non trovato: {SIRIL_CLI_PATH}")
+        logger.error("   Installa Siril da https://siril.org/download/")
+        print(f"\n❌ Siril non trovato: {SIRIL_CLI_PATH}")
+        print("   Plate solving disabilitato. Installa Siril per abilitarlo.")
+        return 0, len(fits_files), None
+    
+    logger.info(f"Trovati {len(fits_files)} file osservatorio → Plate Solving con Siril")
     
     prepared_count = 0
     failed_count = 0
@@ -477,31 +572,41 @@ def process_osservatorio_folder(input_dir, output_dir, logger):
     dec_list = []
     scale_list = []
     
-    with tqdm(total=len(fits_files), desc="  Osservatorio", unit="file") as pbar:
-        for input_file in fits_files:
-            basename = input_file.name
-            name, ext = os.path.splitext(basename)
-            output_file = output_dir / f"{name}_wcs.fits"
-            
-            success = add_wcs_to_file(input_file, output_file, logger)
-            
-            if success:
+    # Plate solving con multithreading
+    with ThreadPoolExecutor(max_workers=min(NUM_THREADS, 2)) as executor:  # Max 2 thread per Siril
+        futures = {
+            executor.submit(solve_file_with_siril, input_file, output_dir, logger): input_file.name
+            for input_file in fits_files
+        }
+        
+        with tqdm(total=len(fits_files), desc="  Plate Solving", unit="file") as pbar:
+            for future in as_completed(futures):
                 try:
-                    with fits.open(output_file) as hdul:
-                        wcs = WCS(hdul[0].header)
-                        if wcs.has_celestial:
-                            ra, dec = wcs.wcs.crval
-                            pixel_scale = abs(wcs.wcs.cdelt[0]) * 3600
-                            ra_list.append(ra)
-                            dec_list.append(dec)
-                            scale_list.append(pixel_scale)
-                    prepared_count += 1
-                except:
+                    result = future.result()
+                    
+                    if result['status'] in ['success', 'solved']:
+                        # Estrai info WCS
+                        try:
+                            with fits.open(result['output']) as hdul:
+                                wcs = WCS(hdul[0].header)
+                                if wcs.has_celestial:
+                                    ra, dec = wcs.wcs.crval
+                                    pixel_scale = abs(wcs.wcs.cdelt[0]) * 3600
+                                    ra_list.append(ra)
+                                    dec_list.append(dec)
+                                    scale_list.append(pixel_scale)
+                            prepared_count += 1
+                        except:
+                            failed_count += 1
+                    else:
+                        failed_count += 1
+                        
+                except Exception as exc:
                     failed_count += 1
-            else:
-                failed_count += 1
-            
-            pbar.update(1)
+                    filename = futures[future]
+                    logger.error(f"❌ {filename}: Exception: {exc}")
+                
+                pbar.update(1)
     
     stats = None
     if ra_list:
@@ -512,7 +617,6 @@ def process_osservatorio_folder(input_dir, output_dir, logger):
         }
     
     return prepared_count, failed_count, stats
-
 
 def process_lith_folder(input_dir, output_dir, logger):
     """Processa LITH/HST."""
