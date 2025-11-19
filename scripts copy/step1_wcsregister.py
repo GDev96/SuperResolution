@@ -67,7 +67,7 @@ except ImportError:
     print("Installa con: pip install reproject")
     print("="*70)
 
-NUM_THREADS = 7
+NUM_THREADS = 1
 REPROJECT_ORDER = 'bilinear'
 log_lock = threading.Lock()
 
