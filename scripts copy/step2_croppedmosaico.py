@@ -305,116 +305,122 @@ def crop_all_images_for_target(base_dir):
 # FUNZIONI - MOSAICO (LOGICA ORIGINALE MANTENUTA)
 # ============================================================================
 
-def create_mosaic_for_target(base_dir):
-    """Crea il mosaico per un target specifico."""
-    print("\n" + "🖼️ "*35)
-    print(f"MOSAICO: {base_dir.name}".center(70))
-    print("🖼️ "*35)
+def create_mosaic(input_folder, output_folder, target_name):
+    """
+    Crea un mosaico finale combinando tutte le immagini ritagliate.
+    FIX: Combinazione corretta preservando dynamic range astronomico.
+    FIX: Path corretto per leggere i file ritagliati.
+    FIX: Aggiunto timestamp al nome file.
+    """
+    print(f"\n🖼️  {'🖼️  '*20}")
+    print(f"                             MOSAICO: {target_name}")
+    print(f"🖼️  {'🖼️  '*20}\n")
     
-    # Path
-    output_dir_base = base_dir / '4_cropped'
-    cropped_dirs = [
-        output_dir_base / 'hubble',
-        output_dir_base / 'observatory'
-    ]
+    # ✅ FIX: Path corretto per i file ritagliati (4_cropped)
+    hubble_folder = input_folder / 'hubble'
+    obs_folder = input_folder / 'observatory'
     
-    mosaic_output_dir = base_dir / '5_mosaics'
-    mosaic_output_file = mosaic_output_dir / 'final_mosaic.fits'
-    
-    # Crea cartella output
-    mosaic_output_dir.mkdir(parents=True, exist_ok=True)
-    
-    # 1. Trova tutti i file FITS ritagliati
+    # Raccogli tutti i file
     all_files = []
-    for d in cropped_dirs:
-        all_files.extend(list(d.glob('*.fits')) + list(d.glob('*.fit')))
-        
+    if hubble_folder.exists():
+        hubble_fits = list(hubble_folder.glob('*.fits'))
+        all_files.extend(sorted(hubble_fits))
+        print(f"   📂 Hubble: {len(hubble_fits)} file")
+    if obs_folder.exists():
+        obs_fits = list(obs_folder.glob('*.fits'))
+        all_files.extend(sorted(obs_fits))
+        print(f"   📂 Observatory: {len(obs_fits)} file")
+    
     if not all_files:
-        print(f"\n❌ ERRORE: Nessun file FITS ritagliato trovato.")
-        return False
-        
+        print(f"❌ Nessun file FITS in {input_folder}")
+        print(f"   Verificare che esistano file in:")
+        print(f"   - {hubble_folder}")
+        print(f"   - {obs_folder}")
+        return None
+    
     print(f"\n✅ Trovati {len(all_files)} file FITS da combinare.")
     
-    # 2. Inizializza gli array per la media
-    try:
-        with fits.open(all_files[0]) as hdul:
-            template_header = hdul[0].header.copy()
-            if len(hdul[0].data.shape) == 3:
-                shape = hdul[0].data[0].shape
-            else:
-                shape = hdul[0].data.shape
-    except Exception as e:
-        print(f"\n❌ ERRORE: Impossibile leggere il primo file {all_files[0].name}: {e}")
-        return False
-        
-    print(f"   Dimensioni mosaico: {shape[1]} x {shape[0]} pixel")
+    # Leggi dimensioni dal primo file
+    with fits.open(all_files[0]) as hdul:
+        reference_shape = hdul[0].data.shape
+        reference_header = hdul[0].header.copy()
     
-    # Array per sommare i valori (usa float64 per precisione)
-    total_flux = np.zeros(shape, dtype=np.float64)
-    # Array per contare quanti pixel validi ci sono in ogni punto
-    n_pixels = np.zeros(shape, dtype=np.int32)
+    print(f"   Dimensioni mosaico: {reference_shape[1]} x {reference_shape[0]} pixel")
     
-    # 3. Itera su tutti i file e combinali
+    # ═══════════════════════════════════════════════════════════════
+    # FIX: Combinazione manuale preservando dynamic range
+    # ═══════════════════════════════════════════════════════════════
+    
     print("\n🔄 Combinazione immagini in corso...")
     
-    for filepath in tqdm(all_files, desc="Combinazione", unit="file"):
+    # Array per accumulare somma e conteggio
+    sum_array = np.zeros(reference_shape, dtype=np.float64)
+    count_array = np.zeros(reference_shape, dtype=np.uint16)
+    
+    for i, filepath in enumerate(tqdm(all_files, desc="Combinazione", unit="file")):
         try:
             with fits.open(filepath) as hdul:
-                img_data = hdul[0].data
-                if len(img_data.shape) == 3:
-                    img_data = img_data[0]
+                data = hdul[0].data.astype(np.float64)
                 
-                # Assicurati che le dimensioni corrispondano
-                if img_data.shape != shape:
-                    print(f"\n⚠️  ATTENZIONE: {filepath.name} ha dimensioni {img_data.shape} diverse da {shape}. Saltato.")
-                    continue
-                    
-                # Trova pixel validi (non NaN e non zero)
-                # Nota: nell'originale era solo ~np.isnan, ma spesso 0 è usato come background
-                valid_mask = ~np.isnan(img_data)
+                # Maschera valori validi (no NaN, no Inf, no zero)
+                valid_mask = np.isfinite(data) & (data != 0)
                 
-                # Sostituisci i NaN con 0 per la somma
-                img_data_no_nan = np.nan_to_num(img_data, nan=0.0, copy=False)
-                
-                # Aggiungi i valori all'array totale
-                total_flux += img_data_no_nan
-                
-                # Incrementa il contatore per i pixel validi
-                n_pixels[valid_mask] += 1
+                # Accumula somma solo dove valido
+                sum_array[valid_mask] += data[valid_mask]
+                count_array[valid_mask] += 1
                 
         except Exception as e:
-            print(f"\n⚠️  ATTENZIONE: Errore nel leggere {filepath.name}: {e}. Saltato.")
-            
-    # 4. Calcola la media finale
+            print(f"\n⚠️  Errore lettura {filepath.name}: {e}")
+            continue
+    
+    # Calcola media preservando dynamic range
     print("\n🧮 Calcolo della media finale...")
     
-    # Inizializza il mosaico finale con NaN
-    mosaic_data = np.full(shape, np.nan, dtype=np.float32)
+    # Evita divisione per zero
+    count_array[count_array == 0] = 1
     
-    # Trova dove abbiamo almeno un pixel
-    valid_stack = n_pixels > 0
+    # Media finale
+    mosaic_data = sum_array / count_array.astype(np.float64)
     
-    # Calcola la media solo dove n_pixels > 0
-    mosaic_data[valid_stack] = (total_flux[valid_stack] / n_pixels[valid_stack]).astype(np.float32)
+    # Statistiche finali
+    valid_final = np.isfinite(mosaic_data) & (mosaic_data != 0)
+    if valid_final.any():
+        print(f"   📊 Range finale: [{mosaic_data[valid_final].min():.3e}, {mosaic_data[valid_final].max():.3e}]")
+        print(f"   📊 Median: {np.median(mosaic_data[valid_final]):.3e}")
+        print(f"   📊 Pixel validi: {valid_final.sum():,} / {mosaic_data.size:,} ({valid_final.sum()/mosaic_data.size*100:.1f}%)")
     
-    # 5. Salva il file FITS finale
-    print(f"\n💾 Salvataggio mosaico in {mosaic_output_file.name}...")
+    # ═══════════════════════════════════════════════════════════════
+    # Salvataggio con header WCS originale + TIMESTAMP
+    # ═══════════════════════════════════════════════════════════════
     
-    # Aggiorna l'header
-    template_header['HISTORY'] = 'Mosaico creato da step2_croppedmosaico.py'
-    template_header['NCOMBINE'] = (len(all_files), 'Numero di file combinati')
+    output_folder.mkdir(parents=True, exist_ok=True)
     
-    try:
-        fits.PrimaryHDU(data=mosaic_data, header=template_header).writeto(mosaic_output_file, overwrite=True)
-    except Exception as e:
-        print(f"\n❌ ERRORE: Impossibile salvare il file FITS finale: {e}")
-        return False
+    # ✅ FIX: Aggiungi timestamp al nome file
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_filename = f'mosaic_{target_name}_{timestamp}.fits'
+    output_path = output_folder / output_filename
+    
+    print(f"\n💾 Salvataggio mosaico in {output_filename}...")
+    
+    # Crea HDU con tipo float32 (preserva dynamic range, più efficiente di float64)
+    hdu = fits.PrimaryHDU(data=mosaic_data.astype(np.float32), header=reference_header)
+    
+    # Aggiungi metadati combinazione
+    hdu.header['NCOMBINE'] = (len(all_files), 'Number of images combined')
+    hdu.header['COMBMETH'] = ('MEAN', 'Combination method')
+    hdu.header['CMBDATE'] = (timestamp, 'Mosaic creation timestamp')
+    hdu.header['TARGET'] = (target_name, 'Target name')
+    hdu.header['HISTORY'] = f'Combined {len(all_files)} images on {datetime.now().isoformat()}'
+    
+    hdu.writeto(output_path, overwrite=True)
+    
+    print(f"\n✅ MOSAICO COMPLETATO: {output_path}")
+    
+    return output_path
 
-    print(f"\n✅ MOSAICO COMPLETATO: {mosaic_output_file}")
-    return True
 
 # ============================================================================
-# MAIN
+# MAIN - FIX: Passa il path corretto a create_mosaic()
 # ============================================================================
 
 def main():
@@ -446,9 +452,15 @@ def main():
             print(f"\n❌ Target {base_dir.name} fallito al ritaglio.")
             failed_targets.append(base_dir)
             continue
-            
+        
+        # ✅ FIX: Passa il path corretto (4_cropped)
+        cropped_dir = base_dir / '4_cropped'
+        mosaic_output_dir = base_dir / '5_mosaics'
+        
         # STEP 2: Mosaico
-        if not create_mosaic_for_target(base_dir):
+        mosaic_path = create_mosaic(cropped_dir, mosaic_output_dir, base_dir.name)
+        
+        if not mosaic_path:
             print(f"\n❌ Target {base_dir.name} fallito al mosaico.")
             failed_targets.append(base_dir)
             continue

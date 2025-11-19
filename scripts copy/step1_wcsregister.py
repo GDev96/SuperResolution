@@ -2,6 +2,7 @@
 PIPELINE COMPLETO: CONVERSIONE WCS + REGISTRAZIONE
 Combina Step 1 (Conversione WCS) e Step 2 (Registrazione) in un unico script.
 FIX ALLINEAMENTO: Frame WCS globale unificato per tutte le immagini.
+FIX MEMORIA: Processing seriale con garbage collection.
 """
 
 import os
@@ -21,6 +22,16 @@ import threading
 import warnings
 from pathlib import Path
 import subprocess
+import gc
+
+# ✅ FIX PATH + IMPORT CORRETTO
+CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from utils.cleanRAM import pulisci_ram
 
 warnings.filterwarnings('ignore', category=fits.verify.VerifyWarning)
 
@@ -67,8 +78,12 @@ except ImportError:
     print("Installa con: pip install reproject")
     print("="*70)
 
-NUM_THREADS = 1
+# ============================================================================
+# PARAMETRI PROCESSING
+# ============================================================================
+NUM_THREADS = 1  # SEMPRE 1 per evitare OOM
 REPROJECT_ORDER = 'bilinear'
+MAX_CANVAS_DIMENSION = 10000  # Limite canvas per evitare OOM
 log_lock = threading.Lock()
 
 # ============================================================================
@@ -164,59 +179,8 @@ def setup_logging():
 # STEP 1: CONVERSIONE WCS
 # ============================================================================
 
-def parse_coordinates(ra_str, dec_str):
-    """Converte coordinate sessagesimali a decimali."""
-    try:
-        coord = SkyCoord(f"{ra_str} {dec_str}", unit=(u.hourangle, u.deg))
-        return coord.ra.degree, coord.dec.degree
-    except:
-        # Fallback manuale
-        ra_parts = ra_str.split()
-        dec_parts = dec_str.split()
-        h, m, s = map(float, ra_parts)
-        ra_deg = (h + m/60 + s/3600) * 15
-        d, m, s = map(float, dec_parts)
-        sign = 1 if d >= 0 else -1
-        dec_deg = d + sign * (m/60 + s/3600)
-        return ra_deg, dec_deg
-
-def calculate_pixel_scale(header):
-    """Calcola pixel scale da header."""
-    xpixsz = header.get('XPIXSZ')
-    focal = header.get('FOCALLEN', header.get('FOCAL'))
-    xbin = header.get('XBINNING', 1)
-    
-    if xpixsz and focal:
-        pixel_size_mm = (xpixsz * xbin) / 1000.0
-        pixel_scale_arcsec = 206.265 * pixel_size_mm / focal
-        return pixel_scale_arcsec / 3600.0
-    return 1.5 / 3600.0
-
-def create_wcs_from_header(header, data_shape):
-    """Crea WCS da OBJCTRA/OBJCTDEC."""
-    try:
-        objctra = header.get('OBJCTRA')
-        objctdec = header.get('OBJCTDEC')
-        if not objctra or not objctdec:
-            return None
-        
-        ra_deg, dec_deg = parse_coordinates(objctra, objctdec)
-        pixel_scale = calculate_pixel_scale(header)
-        
-        wcs = WCS(naxis=2)
-        height, width = data_shape
-        wcs.wcs.crpix = [width/2, height/2]
-        wcs.wcs.crval = [ra_deg, dec_deg]
-        wcs.wcs.cdelt = [-pixel_scale, pixel_scale]
-        wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
-        wcs.wcs.radesys = 'ICRS'
-        wcs.wcs.equinox = 2000.0
-        return wcs
-    except:
-        return None
-
 def solve_file_with_siril(input_file, output_dir, logger):
-    """Plate solving con Siril - FIX con download catalogo automatico."""
+    """Plate solving con Siril."""
     try:
         output_file = output_dir / f"{input_file.stem}_wcs.fits"
         
@@ -224,32 +188,21 @@ def solve_file_with_siril(input_file, output_dir, logger):
             logger.info(f"⏭️  {input_file.name}: già risolto")
             return {'status': 'solved', 'file': input_file.name, 'output': output_file}
         
-        # ============================================================
-        # FIX: Script Siril completo con setup iniziale
-        # ============================================================
         siril_script = f"""
-# Setup: imposta working directory e catalogo
-cd "{input_file.parent}"
-setcatalogue nomad
-
-# Plate solving
-platesolve "{input_file.name}" -out="{output_file.name}" -force
-
-# Exit
-close
-"""
+            cd "{input_file.parent}"
+            setcatalogue nomad
+            platesolve "{input_file.name}" -out="{output_file.name}" -force
+            close
+            """
         
-        # Crea file script temporaneo
         script_path = input_file.parent / f"solve_{input_file.stem}.ssf"
         with open(script_path, 'w') as f:
             f.write(siril_script)
         
-        # Comando Siril con script file
         cmd = [str(SIRIL_CLI_PATH), "-s", str(script_path)]
         
         logger.debug(f"🔍 {input_file.name}: Eseguo Siril...")
         
-        # Esegui con timeout
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -258,13 +211,11 @@ close
             cwd=input_file.parent
         )
         
-        # Cleanup script temporaneo
         try:
             script_path.unlink()
         except:
             pass
         
-        # Verifica successo
         if result.returncode == 0 and output_file.exists():
             try:
                 with fits.open(output_file) as hdul:
@@ -278,7 +229,6 @@ close
                     output_file.unlink()
                 return {'status': 'error', 'file': input_file.name, 'reason': 'Invalid WCS'}
         
-        # Log errori dettagliati
         logger.error(f"❌ {input_file.name}: plate solving fallito")
         if result.stdout:
             logger.debug(f"   STDOUT: {result.stdout[:300]}")
@@ -330,7 +280,7 @@ def solve_file_with_astrometry(input_file, output_dir, logger):
 def process_osservatorio_folder(input_dir, output_dir, logger):
     """
     Processa local_raw: estrae WCS da OBJCTRA/OBJCTDEC.
-    Fallback plate solving se metadati mancanti.
+    FIX: Processing seriale.
     """
     fits_files = list(Path(input_dir).glob('**/*.fit')) + list(Path(input_dir).glob('**/*.fits'))
     
@@ -364,14 +314,11 @@ def process_osservatorio_folder(input_dir, output_dir, logger):
         
         output_file = output_dir / f"{filepath.stem}_wcs.fits"
         
-        # Skip se già processato
         if output_file.exists():
             logger.debug(f"⏭️  {filepath.name}: già elaborato")
             return {'status': 'exists', 'file': filepath.name, 'output': output_file}
         
-        # ============================================================
         # METODO 1: CREA WCS DA OBJCTRA/OBJCTDEC
-        # ============================================================
         try:
             with fits.open(filepath) as hdul:
                 header = hdul[0].header
@@ -380,103 +327,77 @@ def process_osservatorio_folder(input_dir, output_dir, logger):
                 if data is None:
                     raise ValueError("Nessun dato nel file")
                 
-                # Estrai metadati essenziali
                 objctra = header.get('OBJCTRA')
                 objctdec = header.get('OBJCTDEC')
                 xpixsz = header.get('XPIXSZ')
-                ypixsz = header.get('YPIXSZ', xpixsz)
                 focallen = header.get('FOCALLEN', header.get('FOCAL'))
                 xbin = header.get('XBINNING', 1)
-                ybin = header.get('YBINNING', 1)
                 
-                # Verifica presenza coordinate
                 if not (objctra and objctdec):
-                    raise ValueError(f"Metadati WCS mancanti: OBJCTRA={objctra}, OBJCTDEC={objctdec}")
+                    raise ValueError(f"Metadati WCS mancanti")
                 
-                # ============================================================
-                # CONVERSIONE COORDINATE RA/DEC
-                # ============================================================
+                # Conversione coordinate
                 try:
-                    # Metodo 1: Usa SkyCoord di Astropy
-                    # Formato atteso: "1 34 01" (ore minuti secondi) per RA
-                    #                 "30 39 57" (gradi arcmin arcsec) per DEC
-                    coord = SkyCoord(f"{objctra} {objctdec}", 
-                                   unit=(u.hourangle, u.deg))
+                    coord = SkyCoord(f"{objctra} {objctdec}", unit=(u.hourangle, u.deg))
                     ra_deg = coord.ra.degree
                     dec_deg = coord.dec.degree
-                    
-                    logger.debug(f"{filepath.name}: RA={ra_deg:.6f}°, DEC={dec_deg:.6f}°")
-                    
-                except Exception as coord_error:
-                    logger.warning(f"⚠️ {filepath.name}: parsing SkyCoord fallito, uso manuale")
-                    
-                    # Metodo 2: Parsing manuale
+                except:
                     ra_parts = str(objctra).split()
                     dec_parts = str(objctdec).split()
                     
                     if len(ra_parts) != 3 or len(dec_parts) != 3:
-                        raise ValueError(f"Formato coordinate non valido: RA={objctra}, DEC={objctdec}")
+                        raise ValueError(f"Formato coordinate non valido")
                     
-                    # Converti RA (ore -> gradi)
                     h, m, s = map(float, ra_parts)
                     ra_deg = (h + m/60.0 + s/3600.0) * 15.0
                     
-                    # Converti DEC (gradi)
                     d, arcm, arcs = map(float, dec_parts)
                     sign = 1 if d >= 0 else -1
                     dec_deg = d + sign * (abs(arcm)/60.0 + abs(arcs)/3600.0)
-                    
-                    logger.debug(f"{filepath.name}: Manual parse RA={ra_deg:.6f}°, DEC={dec_deg:.6f}°")
                 
-                # ============================================================
-                # CALCOLO PIXEL SCALE
-                # ============================================================
+                logger.debug(f"{filepath.name}: RA={ra_deg:.6f}°, DEC={dec_deg:.6f}°")
+                
+                # Calcolo pixel scale
                 if xpixsz and focallen and focallen > 0:
-                    # Calcolo accurato
                     pixel_size_mm = (xpixsz * xbin) / 1000.0
                     pixel_scale_arcsec = 206.265 * pixel_size_mm / focallen
-                    logger.debug(f"{filepath.name}: Pixel scale calcolato: {pixel_scale_arcsec:.4f}\"/px "
-                               f"(focal={focallen}mm, pixel={xpixsz}μm, bin={xbin})")
+                    
+                    # FIX: Verifica realismo
+                    if pixel_scale_arcsec < 0.1:
+                        estimated_base_focal = focallen * 0.63
+                        pixel_scale_arcsec = 206.265 * pixel_size_mm / estimated_base_focal
+                        logger.warning(f"⚠️ {filepath.name}: FOCALLEN={focallen}mm corretto → scala={pixel_scale_arcsec:.4f}\"/px")
+                    
+                    logger.debug(f"{filepath.name}: Pixel scale: {pixel_scale_arcsec:.4f}\"/px")
+                    
                 elif focallen and focallen > 0:
-                    # Stima con pixel size tipico (12μm per Atik)
                     pixel_size_mm = (12.0 * xbin) / 1000.0
                     pixel_scale_arcsec = 206.265 * pixel_size_mm / focallen
-                    logger.warning(f"⚠️ {filepath.name}: XPIXSZ mancante, uso default 12μm -> {pixel_scale_arcsec:.4f}\"/px")
+                    
+                    if pixel_scale_arcsec < 0.1:
+                        estimated_base_focal = focallen * 0.63
+                        pixel_scale_arcsec = 206.265 * pixel_size_mm / estimated_base_focal
+                    
+                    logger.warning(f"⚠️ {filepath.name}: XPIXSZ mancante → {pixel_scale_arcsec:.4f}\"/px")
                 else:
-                    # Fallback completo (tipico setup amatoriale)
                     pixel_scale_arcsec = 1.5
-                    logger.warning(f"⚠️ {filepath.name}: FOCALLEN=0 o mancante, uso scala default 1.5\"/px")
+                    logger.warning(f"⚠️ {filepath.name}: FOCALLEN=0 → scala default 1.5\"/px")
                 
                 pixel_scale_deg = pixel_scale_arcsec / 3600.0
                 
-                # ============================================================
-                # CREAZIONE WCS
-                # ============================================================
+                # Creazione WCS
                 wcs = WCS(naxis=2)
                 height, width = data.shape
-                
-                # Centro immagine come reference pixel
                 wcs.wcs.crpix = [width / 2.0, height / 2.0]
-                
-                # Coordinate centro (da OBJCTRA/OBJCTDEC)
                 wcs.wcs.crval = [ra_deg, dec_deg]
-                
-                # Pixel scale (negativo per RA per convenzione FITS)
                 wcs.wcs.cdelt = [-pixel_scale_deg, pixel_scale_deg]
-                
-                # Proiezione
                 wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
-                
-                # Sistema di riferimento
                 wcs.wcs.radesys = 'ICRS'
                 wcs.wcs.equinox = 2000.0
                 
-                # ============================================================
-                # SALVATAGGIO FILE CON WCS
-                # ============================================================
+                # Salvataggio
                 new_header = wcs.to_header()
                 
-                # Copia metadati originali importanti
                 preserve_keys = [
                     'DATE-OBS', 'EXPOSURE', 'EXPTIME', 'FILTER', 
                     'INSTRUME', 'OBSERVER', 'TELESCOP',
@@ -484,7 +405,7 @@ def process_osservatorio_folder(input_dir, output_dir, logger):
                     'XBINNING', 'YBINNING', 'XPIXSZ', 'YPIXSZ',
                     'FOCALLEN', 'APERTURE', 'SAT_LEVE',
                     'SITELAT', 'SITELONG', 'FOCUSPOS',
-                    'OBJCTRA', 'OBJCTDEC'  # Mantieni coordinate originali
+                    'OBJCTRA', 'OBJCTDEC'
                 ]
                 
                 for key in preserve_keys:
@@ -494,7 +415,6 @@ def process_osservatorio_folder(input_dir, output_dir, logger):
                         except:
                             pass
                 
-                # Metadati aggiuntivi
                 new_header['ORIGINAL'] = filepath.name
                 new_header['WCSMETHO'] = ('OBJCTRA/OBJCTDEC', 'WCS creation method')
                 new_header['PREPDATE'] = datetime.now().isoformat()
@@ -502,7 +422,6 @@ def process_osservatorio_folder(input_dir, output_dir, logger):
                 new_header['WCSCRA'] = (ra_deg, 'WCS center RA (deg)')
                 new_header['WCSCDEC'] = (dec_deg, 'WCS center DEC (deg)')
                 
-                # Salva
                 fits.PrimaryHDU(data=data, header=new_header).writeto(
                     output_file, 
                     overwrite=True, 
@@ -511,8 +430,7 @@ def process_osservatorio_folder(input_dir, output_dir, logger):
                 
                 created_from_metadata += 1
                 
-                logger.info(f"✅ {filepath.name}: WCS creato da metadati "
-                          f"(RA={ra_deg:.4f}°, DEC={dec_deg:.4f}°, scala={pixel_scale_arcsec:.2f}\"/px)")
+                logger.info(f"✅ {filepath.name}: WCS creato (RA={ra_deg:.4f}°, DEC={dec_deg:.4f}°, scala={pixel_scale_arcsec:.2f}\"/px)")
                 
                 return {
                     'status': 'success',
@@ -525,11 +443,9 @@ def process_osservatorio_folder(input_dir, output_dir, logger):
                 }
                 
         except Exception as e:
-            logger.debug(f"⚠️ {filepath.name}: creazione WCS da metadati fallita: {e}")
+            logger.debug(f"⚠️ {filepath.name}: metadati falliti: {e}")
             
-            # ============================================================
             # FALLBACK: PLATE SOLVING
-            # ============================================================
             if plate_solve_available:
                 logger.debug(f"   → Tentativo plate solving con {solver_name}...")
                 
@@ -538,7 +454,6 @@ def process_osservatorio_folder(input_dir, output_dir, logger):
                 if result['status'] == 'success':
                     platesolve_success += 1
                     
-                    # Estrai statistiche WCS
                     try:
                         with fits.open(result['output']) as hdul:
                             wcs = WCS(hdul[0].header)
@@ -569,50 +484,40 @@ def process_osservatorio_folder(input_dir, output_dir, logger):
                 logger.error(f"❌ {filepath.name}: plate solving non disponibile")
                 return {'status': 'error', 'file': filepath.name}
     
-    # ============================================================
-    # PROCESSING PARALLELO
-    # ============================================================
-    with ThreadPoolExecutor(max_workers=NUM_THREADS) as executor:
-        futures = {executor.submit(process_single_file, f): f for f in fits_files}
-        
-        with tqdm(total=len(fits_files), desc="  Observatory") as pbar:
-            for future in as_completed(futures):
-                result = future.result()
-                
-                if result['status'] in ['success', 'exists']:
-                    # Raccogli statistiche
-                    if 'ra' in result and 'dec' in result and 'scale' in result:
-                        ra_list.append(result['ra'])
-                        dec_list.append(result['dec'])
-                        scale_list.append(result['scale'])
-                    else:
-                        # Rileggi dal file
-                        try:
-                            with fits.open(result['output']) as hdul:
-                                wcs = WCS(hdul[0].header)
-                                if wcs.has_celestial:
-                                    ra, dec = wcs.wcs.crval
-                                    
-                                    if hasattr(wcs.wcs, 'cd') and wcs.wcs.cd is not None:
-                                        scale = np.sqrt(wcs.wcs.cd[0,0]**2 + wcs.wcs.cd[0,1]**2) * 3600
-                                    else:
-                                        scale = abs(wcs.wcs.cdelt[0]) * 3600
-                                    
-                                    ra_list.append(ra)
-                                    dec_list.append(dec)
-                                    scale_list.append(scale)
-                        except:
-                            pass
-                    
-                    prep += 1
-                else:
-                    fail += 1
-                
-                pbar.update(1)
+    # ✅ PROCESSING SERIALE (NO ThreadPoolExecutor)
+    print(f"\n🔄 Processing {len(fits_files)} file (SERIALE)...")
     
-    # ============================================================
-    # STATISTICHE FINALI
-    # ============================================================
+    with tqdm(total=len(fits_files), desc="  Observatory", unit="file") as pbar:
+        for filepath in fits_files:
+            result = process_single_file(filepath)
+            
+            if result['status'] in ['success', 'exists']:
+                if 'ra' in result and 'dec' in result and 'scale' in result:
+                    ra_list.append(result['ra'])
+                    dec_list.append(result['dec'])
+                    scale_list.append(result['scale'])
+                else:
+                    try:
+                        with fits.open(result['output']) as hdul:
+                            wcs = WCS(hdul[0].header)
+                            if wcs.has_celestial:
+                                ra_list.append(wcs.wcs.crval[0])
+                                dec_list.append(wcs.wcs.crval[1])
+                                scale = hdul[0].header.get('PIXSCALE', 1.5)
+                                scale_list.append(scale)
+                    except:
+                        pass
+                
+                prep += 1
+            else:
+                fail += 1
+            
+            pbar.update(1)
+            
+            # Garbage collection ogni 5 file
+            if (pbar.n % 5) == 0:
+                gc.collect()
+    
     print(f"   📊 Metodi usati:")
     print(f"      ✓ WCS da metadati: {created_from_metadata}")
     print(f"      ✓ Plate solving: {platesolve_success}")
@@ -701,7 +606,6 @@ def extract_wcs_info(filepath, logger):
                         data = hdu.data[0] if len(hdu.data.shape) == 3 else hdu.data
                         center = wcs.pixel_to_world(data.shape[1]/2, data.shape[0]/2)
                         
-                        # Calcola pixel scale
                         if hasattr(wcs.wcs, 'cd') and wcs.wcs.cd is not None:
                             scale_deg = np.sqrt(wcs.wcs.cd[0,0]**2 + wcs.wcs.cd[0,1]**2)
                         else:
@@ -746,7 +650,7 @@ def analyze_images(input_dir, source_name, logger):
 def register_to_unified_frame(wcs_info_list, global_wcs, global_shape, ra_center, dec_center, output_dir, source_name, logger):
     """
     Registra immagini nel frame WCS globale unificato.
-    FIX: Tutte le immagini vengono reproiettate nello STESSO frame.
+    FIX MEMORIA: Processing SERIALE con garbage collection esplicito.
     """
     os.makedirs(output_dir, exist_ok=True)
     
@@ -771,7 +675,7 @@ def register_to_unified_frame(wcs_info_list, global_wcs, global_shape, ra_center
                 valid = np.isfinite(data) & (data != 0)
                 if valid.sum() < 100:
                     logger.error(f"❌ {filename}: dati insufficienti")
-                    return {'status': 'error'}
+                    return {'status': 'error', 'file': filename}
                 
                 # Normalizzazione
                 p_low = np.percentile(data[valid], PERCENTILE_LOW)
@@ -790,8 +694,8 @@ def register_to_unified_frame(wcs_info_list, global_wcs, global_shape, ra_center
                 # Denormalizzazione
                 valid_out = (footprint > 0.01) & np.isfinite(reprojected)
                 if not valid_out.any():
-                    logger.error(f"❌ {filename}: nessun pixel valido")
-                    return {'status': 'error'}
+                    logger.warning(f"⚠️ {filename}: nessun pixel valido dopo reproiezione")
+                    return {'status': 'error', 'file': filename}
                 
                 reprojected_denorm = np.where(valid_out, 
                     reprojected * footprint * (p_high - p_low) + p_low, 
@@ -801,39 +705,71 @@ def register_to_unified_frame(wcs_info_list, global_wcs, global_shape, ra_center
                 new_header = global_wcs.to_header()
                 for key in ['DATE-OBS', 'EXPTIME', 'FILTER', 'INSTRUME', 'TELESCOP']:
                     if key in header:
-                        new_header[key] = header[key]
+                        try:
+                            new_header[key] = header[key]
+                        except:
+                            pass
                 
                 new_header['ORIGINAL'] = filename
                 new_header['ALIGNED'] = (True, 'Aligned to global frame')
                 new_header['GLOBCENR'] = (ra_center, 'Global center RA')
                 new_header['GLOBCEND'] = (dec_center, 'Global center DEC')
-                new_header['NORMLOW'] = (p_low, 'Norm low')
-                new_header['NORMHIGH'] = (p_high, 'Norm high')
+                new_header['NORMLOW'] = (p_low, 'Norm low percentile')
+                new_header['NORMHIGH'] = (p_high, 'Norm high percentile')
                 
                 output_path = output_dir / f"reg_{filepath.stem}.fits"
                 fits.PrimaryHDU(data=reprojected_denorm.astype(np.float32), 
                                header=new_header).writeto(output_path, overwrite=True)
                 
                 logger.info(f"✅ {filename}: registrato in frame globale")
-                return {'status': 'success'}
+                return {'status': 'success', 'file': filename}
                 
+        except MemoryError as e:
+            logger.error(f"❌ {filename}: OUT OF MEMORY - {e}")
+            return {'status': 'error', 'file': filename, 'reason': 'OOM'}
+            
         except Exception as e:
             logger.error(f"❌ {filename}: {e}")
-            return {'status': 'error'}
-    
-    with ThreadPoolExecutor(max_workers=NUM_THREADS) as executor:
-        futures = {executor.submit(reproject_single, info): info for info in wcs_info_list}
+            return {'status': 'error', 'file': filename, 'reason': str(e)}
         
-        with tqdm(total=len(wcs_info_list), desc=f"  {source_name}") as pbar:
-            for future in as_completed(futures):
-                result = future.result()
-                if result['status'] == 'success':
-                    success += 1
-                else:
-                    error += 1
-                pbar.update(1)
+        finally:
+            # ✅ CLEANUP MEMORIA ESPLICITO
+            try:
+                del data, data_norm, reprojected, footprint, reprojected_denorm
+            except:
+                pass
+            gc.collect()
+    
+    # ✅ PROCESSING SERIALE (NO ThreadPoolExecutor)
+    print(f"\n🔄 Registrazione {source_name}: {len(wcs_info_list)} immagini")
+    print(f"   ⚙️  Modalità: SERIALE (1 immagine alla volta)")
+    
+    with tqdm(total=len(wcs_info_list), desc=f"  {source_name}", unit="img") as pbar:
+        for idx, info in enumerate(wcs_info_list):
+            # Stima memoria
+            mem_mb = (global_shape[0] * global_shape[1] * 4 * 3) / (1024**2)
+            pbar.set_postfix({
+                'img': f"{idx+1}/{len(wcs_info_list)}", 
+                'mem': f"~{mem_mb:.0f}MB"
+            })
+            
+            result = reproject_single(info)
+            
+            if result['status'] == 'success':
+                success += 1
+            else:
+                error += 1
+            
+            pbar.update(1)
+            
+            # ✅ GARBAGE COLLECTION ogni 3 immagini
+            if (idx + 1) % 3 == 0:
+                gc.collect()
+                pbar.set_postfix({'gc': '♻️ cleanup'})
     
     print(f"   ✓ Successo: {success}, ✗ Errori: {error}")
+    logger.info(f"{source_name}: {success} successi, {error} errori")
+    
     return success, error
 
 # ============================================================================
@@ -857,6 +793,10 @@ def main_step1(input_obs, input_lith, output_obs, output_lith, logger):
     prep_lith, fail_lith, _ = process_lith_folder(input_lith, output_lith, logger)
     print(f"   ✓ Processati: {prep_lith}, ✗ Falliti: {fail_lith}")
     
+    # ✅ FIX: Usa funzione corretta
+    print("\n🧹 Pulizia RAM post-Step1...")
+    pulisci_ram(verbose=True, aggressive=True)
+
     return (prep_obs + prep_lith) > 0
 
 def main_step2(input_hubble, input_obs, output_hubble, output_obs, target_name, logger):
@@ -906,6 +846,27 @@ def main_step2(input_hubble, input_obs, output_hubble, output_obs, target_name, 
     nx_global = int(np.ceil(ra_span / target_scale_deg))
     ny_global = int(np.ceil(dec_span / target_scale_deg))
     
+    # ✅ LIMITE CANVAS GLOBALE
+    if nx_global > MAX_CANVAS_DIMENSION or ny_global > MAX_CANVAS_DIMENSION:
+        scale_factor = max(nx_global, ny_global) / MAX_CANVAS_DIMENSION
+        target_scale_arcsec *= scale_factor
+        target_scale_deg = target_scale_arcsec / 3600
+        
+        nx_global = int(np.ceil(ra_span / target_scale_deg))
+        ny_global = int(np.ceil(dec_span / target_scale_deg))
+        
+        logger.warning(f"⚠️ Canvas ridimensionato: {nx_global}x{ny_global} (scala {target_scale_arcsec:.4f}\"/px)")
+        print(f"\n   ⚠️ Canvas ridotto a {nx_global}x{ny_global} px")
+    
+    # Calcola memoria
+    mem_per_image_gb = (nx_global * ny_global * 4 * 3) / (1024**3)
+    logger.info(f"💾 Memoria stimata: {mem_per_image_gb:.2f} GB per immagine")
+    print(f"   💾 Memoria: ~{mem_per_image_gb:.2f} GB/immagine")
+    
+    if mem_per_image_gb > 2.0:
+        logger.warning(f"⚠️ Memoria elevata!")
+        print(f"   ⚠️ ATTENZIONE: Memoria elevata ({mem_per_image_gb:.1f} GB)")
+    
     # WCS globale
     global_wcs = WCS(naxis=2)
     global_wcs.wcs.ctype = ['RA---TAN', 'DEC--TAN']
@@ -930,13 +891,20 @@ def main_step2(input_hubble, input_obs, output_hubble, output_obs, target_name, 
                                         ra_center, dec_center, output_hubble, "HUBBLE", logger)
         total_success += s
         total_error += e
+
+        print("\n🧹 Pulizia RAM post-Hubble...")
+        pulisci_ram(verbose=True, aggressive=True)
     
     if obs_info:
         s, e = register_to_unified_frame(obs_info, global_wcs, (ny_global, nx_global),
                                         ra_center, dec_center, output_obs, "OBSERVATORY", logger)
         total_success += s
         total_error += e
-    
+
+        # ✅ FIX: Usa funzione corretta
+        print("\n🧹 Pulizia RAM post-Observatory...")
+        pulisci_ram(verbose=True, aggressive=True)
+
     print(f"\n📊 RIEPILOGO: {total_success} successo, {total_error} errori")
     return total_success > 0
 

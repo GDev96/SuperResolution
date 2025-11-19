@@ -233,6 +233,204 @@ def analyze_fits_detailed(filepath):
 # DIAGNOSTICA TARGET
 # ============================================================================
 
+def create_mosaic_diagnostic_plot(target_dir, target_name):
+    """
+    Crea plot diagnostico dettagliato del mosaico finale.
+    Include: immagine, istogramma, statistiche, e controllo binarizzazione.
+    """
+    mosaic_path = target_dir / '5_mosaics' / 'final_mosaic.fits'
+    
+    if not mosaic_path.exists():
+        print(f"   ⏭️  {target_name}: Nessun mosaico trovato")
+        return
+    
+    try:
+        with fits.open(mosaic_path) as hdul:
+            data = hdul[0].data
+            if len(data.shape) == 3:
+                data = data[0]
+            
+            # Maschera valori validi
+            nan_mask = np.isnan(data)
+            inf_mask = np.isinf(data)
+            valid_mask = ~(nan_mask | inf_mask)
+            valid_data = data[valid_mask]
+            
+            if valid_data.size == 0:
+                print(f"   ❌ {target_name}: Mosaico vuoto (tutti NaN/Inf)")
+                return
+            
+            # Statistiche
+            stats = {
+                'min': float(valid_data.min()),
+                'max': float(valid_data.max()),
+                'mean': float(valid_data.mean()),
+                'median': float(np.median(valid_data)),
+                'std': float(valid_data.std()),
+                'p01': float(np.percentile(valid_data, 0.1)),
+                'p1': float(np.percentile(valid_data, 1)),
+                'p99': float(np.percentile(valid_data, 99)),
+                'p999': float(np.percentile(valid_data, 99.9)),
+                'nan_pct': float(np.sum(nan_mask) / data.size * 100),
+                'zero_pct': float(np.sum(valid_data == 0) / valid_data.size * 100),
+                'unique_values': len(np.unique(valid_data[:100000]))  # Sample per velocità
+            }
+            
+            # Controllo binarizzazione
+            is_binary = (stats['unique_values'] < 100)
+            
+            # === CREA PLOT 2x3 ===
+            fig = plt.figure(figsize=(18, 12))
+            gs = GridSpec(2, 3, figure=fig, hspace=0.3, wspace=0.3)
+            
+            # --- ROW 1: IMMAGINE + HISTOGRAM ---
+            
+            # 1. Immagine RAW
+            ax1 = fig.add_subplot(gs[0, 0])
+            im1 = ax1.imshow(data, origin='lower', cmap='gray', interpolation='none')
+            ax1.set_title(f'Raw Data\n{data.shape[1]}x{data.shape[0]} px', fontsize=12)
+            ax1.axis('off')
+            plt.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
+            
+            # 2. Immagine CLIPPED (1-99 percentile)
+            ax2 = fig.add_subplot(gs[0, 1])
+            vmin, vmax = stats['p1'], stats['p99']
+            im2 = ax2.imshow(data, origin='lower', cmap='gray', 
+                           vmin=vmin, vmax=vmax, interpolation='none')
+            ax2.set_title(f'Clipped [p1, p99]\nvmin={vmin:.2e}, vmax={vmax:.2e}', fontsize=12)
+            ax2.axis('off')
+            plt.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
+            
+            # 3. Istogramma LOG
+            ax3 = fig.add_subplot(gs[0, 2])
+            
+            # Rimuovi zeri per log
+            nonzero_data = valid_data[valid_data > 0]
+            if nonzero_data.size > 0:
+                bins = np.logspace(np.log10(nonzero_data.min()), 
+                                  np.log10(nonzero_data.max()), 100)
+                ax3.hist(nonzero_data, bins=bins, color='blue', alpha=0.7, edgecolor='black')
+                ax3.set_xscale('log')
+                ax3.set_yscale('log')
+                ax3.axvline(stats['median'], color='red', linestyle='--', linewidth=2, label='Median')
+                ax3.axvline(stats['p1'], color='orange', linestyle=':', linewidth=2, label='p1')
+                ax3.axvline(stats['p99'], color='orange', linestyle=':', linewidth=2, label='p99')
+                ax3.set_xlabel('Pixel Value (log)', fontsize=10)
+                ax3.set_ylabel('Count (log)', fontsize=10)
+                ax3.set_title('Histogram (log-log)', fontsize=12)
+                ax3.legend()
+                ax3.grid(True, alpha=0.3)
+            else:
+                ax3.text(0.5, 0.5, 'No positive values', ha='center', va='center', fontsize=14)
+            
+            # --- ROW 2: ZOOM + STATISTICS ---
+            
+            # 4. ZOOM centrale (1/4 delle dimensioni)
+            ax4 = fig.add_subplot(gs[1, 0])
+            cy, cx = data.shape[0]//2, data.shape[1]//2
+            half_h, half_w = data.shape[0]//4, data.shape[1]//4
+            zoom_data = data[cy-half_h:cy+half_h, cx-half_w:cx+half_w]
+            im4 = ax4.imshow(zoom_data, origin='lower', cmap='gray', 
+                           vmin=stats['p1'], vmax=stats['p99'], interpolation='none')
+            ax4.set_title('Central Zoom (1/4)', fontsize=12)
+            ax4.axis('off')
+            plt.colorbar(im4, ax=ax4, fraction=0.046, pad=0.04)
+            
+            # 5. Mappa NaN/Inf
+            ax5 = fig.add_subplot(gs[1, 1])
+            mask_rgb = np.zeros((*data.shape, 3))
+            mask_rgb[nan_mask, 0] = 1  # Rosso per NaN
+            mask_rgb[inf_mask, 1] = 1  # Verde per Inf
+            mask_rgb[valid_mask & (data == 0), 2] = 1  # Blu per zero
+            ax5.imshow(mask_rgb, origin='lower', interpolation='none')
+            ax5.set_title(f'NaN/Inf/Zero Map\nNaN={stats["nan_pct"]:.1f}%, Zero={stats["zero_pct"]:.1f}%', 
+                         fontsize=12)
+            ax5.axis('off')
+            
+            # 6. STATISTICHE TESTUALI
+            ax6 = fig.add_subplot(gs[1, 2])
+            ax6.axis('off')
+            
+            status_color = 'red' if is_binary else 'green'
+            status_text = '❌ BINARIZZATO' if is_binary else '✅ CONTINUO'
+            
+            stats_text = f"""
+STATISTICHE MOSAICO
+{'='*30}
+
+🔢 VALORI:
+   Min:     {stats['min']:.6e}
+   Max:     {stats['max']:.6e}
+   Mean:    {stats['mean']:.6e}
+   Median:  {stats['median']:.6e}
+   Std:     {stats['std']:.6e}
+
+📊 PERCENTILI:
+   p0.1:    {stats['p01']:.6e}
+   p1:      {stats['p1']:.6e}
+   p99:     {stats['p99']:.6e}
+   p99.9:   {stats['p999']:.6e}
+
+🎨 DINAMICA:
+   Range:   {stats['max']/stats['min']:.2e}x
+   p99/med: {stats['p99']/stats['median']:.2f}x
+
+🔍 QUALITÀ:
+   NaN:         {stats['nan_pct']:.1f}%
+   Zero:        {stats['zero_pct']:.1f}%
+   Unique vals: {stats['unique_values']}
+
+⚠️  STATUS: {status_text}
+            """
+            
+            ax6.text(0.1, 0.95, stats_text, 
+                    transform=ax6.transAxes,
+                    fontsize=10,
+                    verticalalignment='top',
+                    family='monospace',
+                    bbox=dict(boxstyle='round', 
+                            facecolor='white', 
+                            edgecolor=status_color,
+                            linewidth=3,
+                            alpha=0.9))
+            
+            # Titolo generale
+            fig.suptitle(f'{target_name} - DIAGNOSTICA MOSAICO FINALE', 
+                        fontsize=16, fontweight='bold', y=0.98)
+            
+            # Salva
+            output_path = OUTPUT_DIR / f'{target_name}_mosaic_diagnostic.png'
+            plt.savefig(output_path, dpi=150, bbox_inches='tight')
+            print(f"   💾 Diagnostica mosaico: {output_path}")
+            
+            # Salva anche versione solo immagine (alta qualità)
+            fig_simple = plt.figure(figsize=(12, 12))
+            ax_simple = fig_simple.add_subplot(111)
+            im_simple = ax_simple.imshow(data, origin='lower', cmap='gray', 
+                                        vmin=stats['p1'], vmax=stats['p99'], 
+                                        interpolation='none')
+            ax_simple.set_title(f'{target_name} - Mosaico Finale ({status_text})', 
+                               fontsize=14, fontweight='bold')
+            ax_simple.axis('off')
+            plt.colorbar(im_simple, ax=ax_simple, fraction=0.046, pad=0.04)
+            
+            output_simple = OUTPUT_DIR / f'{target_name}_mosaic_simple.png'
+            plt.savefig(output_simple, dpi=300, bbox_inches='tight')
+            print(f"   💾 Mosaico semplice (alta qualità): {output_simple}")
+            
+            plt.close('all')
+            
+            # Ritorna stato per riepilogo
+            return {
+                'exists': True,
+                'is_binary': is_binary,
+                'stats': stats
+            }
+            
+    except Exception as e:
+        print(f"   ❌ Errore lettura mosaico {target_name}: {str(e)}")
+        return None
+
 def diagnose_target(target_dir):
     """Diagnostica completa di un singolo target."""
     target_name = target_dir.name
@@ -305,20 +503,14 @@ def diagnose_target(target_dir):
         print(f"   Overlap totali: {alignment['total_overlaps']}/{len(alignment['overlaps'])}")
         print(f"   Distanza media: {alignment['avg_distance']:.1f} arcsec")
     
-    # === ANALISI MOSAICO ===
-    mosaic_path = target_dir / '5_mosaics' / 'final_mosaic.fits'
-    if mosaic_path.exists():
-        print(f"\n{'─'*70}")
-        print("🖼️  MOSAICO FINALE")
-        print(f"{'─'*70}")
-        
-        stats = analyze_fits_detailed(mosaic_path)
-        
-        if stats and stats['status'] == 'OK':
-            results['mosaic'] = stats
-            print(f"\n   Range: [{stats['min']:.3e}, {stats['max']:.3e}]")
-            print(f"   Median: {stats['median']:.3e}")
-            print(f"   {'✅ OK' if not stats['likely_binary'] else '❌ BINARIO'}")
+    # === DIAGNOSTICA MOSAICO ===
+    print(f"\n{'─'*70}")
+    print("🖼️  DIAGNOSTICA MOSAICO")
+    print(f"{'─'*70}")
+    
+    mosaic_result = create_mosaic_diagnostic_plot(target_dir, target_name)
+    if mosaic_result:
+        results['mosaic'] = mosaic_result
     
     return results
 
@@ -522,13 +714,15 @@ def create_diagnostic_summary(all_results):
         # Mosaico
         if result.get('mosaic'):
             mosaic = result['mosaic']
-            status = '✅ OK' if not mosaic.get('likely_binary') else '❌ BINARIO'
-            print(f"   Mosaico: {status}")
+            if mosaic['is_binary']:
+                print(f"   Mosaico: ❌ BINARIZZATO (unique={mosaic['stats']['unique_values']})")
+            else:
+                print(f"   Mosaico: ✅ CONTINUO (range={mosaic['stats']['max']/mosaic['stats']['min']:.2e}x)")
 
 def main():
     """Funzione principale."""
     print("="*70)
-    print("🔬 DIAGNOSTICA COMPLETA + COMPARAZIONE".center(70))
+    print("🔬 DIAGNOSTICA COMPLETA + MOSAICO ANALYSIS".center(70))
     print("="*70)
     
     target_dirs = [d for d in ROOT_DATA.iterdir() if d.is_dir() and d.name.startswith('M')]
