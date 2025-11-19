@@ -113,7 +113,7 @@ def ask_continue_to_next_step():
     print("   1️⃣  Continua con Step 3 (Analisi Patch - step3_analizzapatch.py)")
     print("   2️⃣  Termina qui")
     
-    next_script_name = 'step3_analizzapatch.py'
+    next_script_name = 'Dataset_step3_analizzapatch.py'
     
     while True:
         print("\n" + "─"*70)

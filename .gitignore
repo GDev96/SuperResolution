@@ -9,18 +9,20 @@ __pycache__/
 *.log
 
 # === DATI ELABORATI (Auto-generati) ===
-# IMPORTANTE: img_lights_1/ deve essere inclusa per Git LFS!
 data/
 
-# === LOGS E CACHE ===
+# === LOGS E OUTPUT ===
 logs/
 temp_*/
+outputs/
 
-# === MODELLI AI GRANDI ===
-models/*.pth
-models/*.pt
-models/*.h5
+# === MODELLI E PESI (FILE GRANDI) ===
+models/
+weights/
 *.onnx
+*.pth
+*.pt
+*.h5
 
 # === FILE TEMPORANEI ===
 *.tmp
