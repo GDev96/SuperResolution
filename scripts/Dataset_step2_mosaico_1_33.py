@@ -365,7 +365,7 @@ def main():
     # Chiedi di proseguire (gestisce passaggio path assoluti al prossimo script)
     if ask_continue_to_next_step():
         try:
-            next_script = SCRIPTS_DIR / 'step3_analizzapatch.py'
+            next_script = SCRIPTS_DIR / 'Dataset_step3_analizzapatch.py'
             if next_script.exists():
                 for base_dir in successful_targets:
                     print(f"\n🚀 Avvio Step 5 (Analisi Patch) per {base_dir.name}...")
