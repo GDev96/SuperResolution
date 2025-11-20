@@ -237,8 +237,9 @@ def process_single_target(base_dir, logger):
     print(f"LR: {TARGET_SIZE_GROUND}px | HR: {TARGET_SIZE_HUBBLE}px".center(70))
     print("🎯"*35)
     
-    input_hubble = base_dir / '4_cropped' / 'hubble'
-    input_observatory = base_dir / '4_cropped' / 'observatory'
+  # MODIFICA: Prende i file direttamente dalla cartella '3_registered_native'
+    input_hubble = base_dir / '3_registered_native' / 'hubble'
+    input_observatory = base_dir / '3_registered_native' / 'observatory'
     output_base = base_dir / '6_patches_from_cropped'
     
     if output_base.exists(): shutil.rmtree(output_base)
