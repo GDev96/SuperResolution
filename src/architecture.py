@@ -29,7 +29,6 @@ class AntiCheckerboardLayer(nn.Module):
 class HybridSuperResolutionModel(nn.Module):
     def __init__(self, target_scale=None, smoothing='balanced', device='cuda'):
         super().__init__()
-        # target_scale è ignorato qui perché fissato a 512px output
         
         if RRDBNet is None: raise ImportError("BasicSR mancante.")
         
@@ -40,14 +39,30 @@ class HybridSuperResolutionModel(nn.Module):
         self.has_stage2 = False
         self.stage2 = nn.Identity()
         
-        # Stage 2: HAT (Upscale x2)
+        # Stage 2: HAT-LIGHT (OTTIMIZZATO PER 6GB VRAM)
         # Input 160 -> 320
         if HAT_Arch:
             try:
-                self.stage2 = HAT_Arch(img_size=64, patch_size=1, in_chans=1, embed_dim=180, depths=[6]*6, 
-                                       num_heads=[6]*6, window_size=16, compress_ratio=3, squeeze_factor=30, 
-                                       conv_scale=0.01, overlap_ratio=0.5, mlp_ratio=2., qkv_bias=True, 
-                                       upscale=2, img_range=1., upsampler='pixelshuffle', resi_connection='1conv')
+                # MODIFICHE CRUCIALI QUI SOTTO:
+                self.stage2 = HAT_Arch(
+                    img_size=64, 
+                    patch_size=1, 
+                    in_chans=1, 
+                    embed_dim=48,           # RIDOTTO DA 180 A 48
+                    depths=[2, 2, 2, 2],    # RIDOTTO DA [6,6,6,6] A [2,2,2,2]
+                    num_heads=[2, 2, 2, 2], # RIDOTTO DA [6,6,6,6] A [2,2,2,2]
+                    window_size=16, 
+                    compress_ratio=3, 
+                    squeeze_factor=30, 
+                    conv_scale=0.01, 
+                    overlap_ratio=0.5, 
+                    mlp_ratio=2., 
+                    qkv_bias=True, 
+                    upscale=2, 
+                    img_range=1., 
+                    upsampler='pixelshuffle', 
+                    resi_connection='1conv'
+                )
                 self.has_stage2 = True
             except: pass
 
@@ -65,7 +80,6 @@ class HybridSuperResolutionModel(nn.Module):
         x = self.s1(self.stage1(x))
         
         # 2. HAT: 160x160 -> 320x320
-        # 160 è divisibile per 16, quindi HAT funziona senza padding!
         if self.has_stage2: 
             x = self.s2(self.stage2(x))
         
