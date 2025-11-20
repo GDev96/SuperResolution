@@ -27,28 +27,32 @@ class AntiCheckerboardLayer(nn.Module):
     def forward(self, x): return self.conv(x)
 
 class HybridSuperResolutionModel(nn.Module):
-    def __init__(self, target_scale=None, smoothing='balanced', device='cuda'):
+    def __init__(self, target_scale=None, smoothing='balanced', device='cuda', output_size=(512, 512)):
+        """
+        Versione Standard/Heavy
+        """
         super().__init__()
         
+        # Gestione dinamica output size
+        self.output_size = (output_size, output_size) if isinstance(output_size, int) else output_size
+
         if RRDBNet is None: raise ImportError("BasicSR mancante.")
         
-        # Stage 1: RRDBNet (Upscale x2)
-        # Input 80 -> 160
+        # Stage 1: RRDBNet (Standard Heavy Config)
         self.stage1 = RRDBNet(num_in_ch=1, num_out_ch=1, num_feat=64, num_block=23, num_grow_ch=32, scale=2)
         
         self.has_stage2 = False
         self.stage2 = nn.Identity()
         
         # Stage 2: HAT FULL STANDARD (Configurazione Pesante)
-        # Input 160 -> 320
         if HAT_Arch:
             try:
                 self.stage2 = HAT_Arch(
                     img_size=64, 
                     patch_size=1, 
                     in_chans=1, 
-                    embed_dim=180,          # MAX QUALITY (Pesante)
-                    depths=[6, 6, 6, 6, 6, 6], # MAX DEPTH (Pesante)
+                    embed_dim=180,          
+                    depths=[6, 6, 6, 6, 6, 6], 
                     num_heads=[6, 6, 6, 6, 6, 6], 
                     window_size=16, 
                     compress_ratio=3, 
@@ -75,15 +79,15 @@ class HybridSuperResolutionModel(nn.Module):
         self.to(device)
 
     def forward(self, x):
-        # 1. BasicSR: 80x80 -> 160x160
+        # 1. BasicSR
         x = self.s1(self.stage1(x))
         
-        # 2. HAT: 160x160 -> 320x320
-        # Funziona senza padding perché 160 è multiplo di 16
+        # 2. HAT
         if self.has_stage2: 
             x = self.s2(self.stage2(x))
         
-        # 3. Interpolazione Finale: 320x320 -> 512x512
-        x = F.interpolate(x, size=(512, 512), mode='bicubic', align_corners=False, antialias=True)
+        # 3. Interpolazione Finale dinamica (se necessaria)
+        if x.shape[-2:] != self.output_size:
+            x = F.interpolate(x, size=self.output_size, mode='bicubic', align_corners=False, antialias=True)
         
         return self.sf(x)

@@ -35,6 +35,8 @@ python scripts\Modello_3_verifica_copy.py
 
 python scripts\Modello_4_train_light.py
 
+python scripts\Modello_5_inference_copy.py
+
 
 
 tensorboard --logdir=outputs/M33/tensorboard_light
