@@ -217,7 +217,7 @@ def check_dataset(target_dir):
 
 def ask_continue_to_next_step():
     """Chiede se proseguire con il training."""
-    next_script_name = 'Modello_4_train.py'
+    next_script_name = 'Modello_4_train_heavy.py'
     HERE = Path(__file__).resolve().parent
     next_script_path = HERE / next_script_name
 

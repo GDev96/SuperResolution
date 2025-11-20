@@ -13,9 +13,10 @@ python scripts\Modello_2_prepare_data.py
 
 python scripts\Modello_3_verifica.py
 
-python scripts\Modello_4_train.py
+python scripts\Modello_4_train_heavy.py
 
 
+python scripts\Modello_4_train_light.py
 
 tensorboard --logdir=outputs/M33/tensorboard
 
