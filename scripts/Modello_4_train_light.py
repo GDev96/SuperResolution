@@ -45,13 +45,17 @@ except ImportError as e:
 ROOT_DATA_DIR = PROJECT_ROOT / "data"
 
 # ============================================================================
-# HARDWARE CONFIG (LIGHT)
+# HARDWARE CONFIG (LIGHT & RAM BOOST)
 # ============================================================================
 HARDWARE_CONFIG = {
     'batch_size': 1,          
     'accumulation_steps': 1,  
     'target_lr_size': 80,     
-    'target_hr_size': 128,    
+    'target_hr_size': 128,
+    
+    # --- CONFIGURAZIONE RAM AGGRESSIVA ---
+    'num_workers': 6,        # Numero processi paralleli (Aumenta RAM usage)
+    'prefetch_factor': 4,    # Batch pre-caricati per worker
 }
 
 # ============================================================================
@@ -118,7 +122,6 @@ def train(args, target_dir):
     print(f"   👉 APRI IL BROWSER SU: http://localhost:6006/")
     print("-" * 70)
     try:
-        # Cerca di creare un path relativo per il comando (più corto)
         rel_log_dir = log_dir.relative_to(PROJECT_ROOT)
         cmd_path = rel_log_dir
     except ValueError:
@@ -127,9 +130,8 @@ def train(args, target_dir):
     print(f"   Per avviare il server, apri un nuovo terminale ed esegui:")
     print(f"   tensorboard --logdir={cmd_path}")
     print("="*70 + "\n")
-    # ---------------------------------
     
-    # Setup Dataset
+    # --- DATASET SETUP ---
     splits_dir = target_dir / "6_patches_from_cropped" / "splits"
     train_pairs = create_json_from_split_folder(splits_dir / "train")
     val_pairs = create_json_from_split_folder(splits_dir / "val")
@@ -139,15 +141,36 @@ def train(args, target_dir):
     with open(temp_train, 'w') as f: json.dump(train_pairs, f)
     with open(temp_val, 'w') as f: json.dump(val_pairs, f)
     
-    # Dataset Load da src.light (con force_hr_size)
+    # Dataset Load
     train_ds = AstronomicalDataset(temp_train, PROJECT_ROOT, augment=True, force_hr_size=hr_size)
     val_ds = AstronomicalDataset(temp_val, PROJECT_ROOT, augment=False, force_hr_size=hr_size)
     
     if temp_train.exists(): temp_train.unlink()
     if temp_val.exists(): temp_val.unlink()
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0, pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=0, pin_memory=True)
+    # --- DATALOADER OTTIMIZZATO PER RAM ---
+    # Persistent Workers = True mantiene i processi vivi nella RAM
+    # Prefetch Factor = 4 riempie il buffer in anticipo
+    print(f"🚀 RAM BOOST: {HARDWARE_CONFIG['num_workers']} Workers | Prefetch: {HARDWARE_CONFIG['prefetch_factor']}")
+    
+    train_loader = DataLoader(
+        train_ds, 
+        batch_size=args.batch_size, 
+        shuffle=True, 
+        num_workers=HARDWARE_CONFIG['num_workers'],  
+        prefetch_factor=HARDWARE_CONFIG['prefetch_factor'], 
+        persistent_workers=True,
+        pin_memory=True
+    )
+    
+    # Validation loader (più leggero ma parallelo)
+    val_loader = DataLoader(
+        val_ds, 
+        batch_size=1, 
+        shuffle=False, 
+        num_workers=2, 
+        pin_memory=True
+    )
 
     print(f"\n🏗️  Model Setup (Output: {hr_size}x{hr_size})...")
     model = HybridSuperResolutionModel(smoothing=args.smoothing, device=device, output_size=hr_size).to(device)
@@ -165,8 +188,8 @@ def train(args, target_dir):
         pbar = tqdm(train_loader, desc=f"Ep {epoch+1}")
         
         for batch in pbar:
-            lr = batch['lr'].to(device)
-            hr = batch['hr'].to(device)
+            lr = batch['lr'].to(device, non_blocking=True)
+            hr = batch['hr'].to(device, non_blocking=True)
             
             optimizer.zero_grad(set_to_none=True)
             
@@ -187,20 +210,19 @@ def train(args, target_dir):
             epoch_loss += loss.item()
             global_step += 1
             
-            # Log training loss ogni step
             writer.add_scalar('Loss/Train_Step', loss.item(), global_step)
             pbar.set_postfix({'loss': f"{loss.item():.4f}"})
             
         # Validation
         model.eval()
         metrics = Metrics()
-        
-        # Visualizzazione immagini (solo primo batch della val)
         visualized = False
         
         with torch.no_grad():
             for i, batch in enumerate(tqdm(val_loader, desc="Val", leave=False)):
-                lr, hr = batch['lr'].to(device), batch['hr'].to(device)
+                lr = batch['lr'].to(device, non_blocking=True)
+                hr = batch['hr'].to(device, non_blocking=True)
+                
                 pred = model(lr)
                 metrics.update(pred, hr)
                 
@@ -215,18 +237,19 @@ def train(args, target_dir):
         
         print(f"   Loss: {avg_train_loss:.4f} | PSNR: {res['psnr']:.2f} dB")
         
-        # Log Epoca
         writer.add_scalar('Loss/Train_Epoch', avg_train_loss, epoch)
         writer.add_scalar('Metrics/PSNR', res['psnr'], epoch)
         writer.add_scalar('Metrics/SSIM', res['ssim'], epoch)
         
-        # Salva sempre l'ultimo nel light test
         torch.save(model.state_dict(), save_dir / "last_model_light.pth")
 
     writer.close()
     print("\n✅ Test Light Completato.")
 
 if __name__ == "__main__":
+    # Windows support for multiprocessing needs freeze_support() or main guard
+    # (Già gestito dall'if __name__ == "__main__")
+    
     parser = argparse.ArgumentParser()
     parser.add_argument('--target', type=str)
     parser.add_argument('--epochs', type=int, default=3)
