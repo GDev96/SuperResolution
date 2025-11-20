@@ -142,7 +142,7 @@ def ask_continue_to_cropping():
     print("   2️⃣  Termina qui")
     
     # MODIFICATO: Nome del nuovo file
-    next_script_name = 'Dataset_step2_mosaico_1_33.py'
+    next_script_name = 'Dataset_step2_mosaico_full.py'
     
     while True:
         print("\n" + "─"*70)
@@ -1175,7 +1175,7 @@ def main():
     if ask_continue_to_cropping():
         try:
             # MODIFICATO: Usa il nuovo nome file
-            next_script = SCRIPTS_DIR / 'Dataset_step2_mosaico_1_33.py'
+            next_script = SCRIPTS_DIR / 'Dataset_step2_mosaico_full.py'
             
             if next_script.exists():
                 print(f"\n🚀 Avvio Step 3+4 in loop per {len(successful_targets)} target...")
