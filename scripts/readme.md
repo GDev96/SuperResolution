@@ -22,3 +22,7 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 pip install scipy pyyaml lmdb addict future yapf "numpy<2.0"
 pip install opencv-python lmdb addict future yapf
 pip install einops timm
+
+
+
+(Versione HAT-Light per architettura se crusha

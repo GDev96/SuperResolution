@@ -39,18 +39,17 @@ class HybridSuperResolutionModel(nn.Module):
         self.has_stage2 = False
         self.stage2 = nn.Identity()
         
-        # Stage 2: HAT-LIGHT (OTTIMIZZATO PER 6GB VRAM)
+        # Stage 2: HAT FULL STANDARD (Configurazione Pesante)
         # Input 160 -> 320
         if HAT_Arch:
             try:
-                # MODIFICHE CRUCIALI QUI SOTTO:
                 self.stage2 = HAT_Arch(
                     img_size=64, 
                     patch_size=1, 
                     in_chans=1, 
-                    embed_dim=48,           # RIDOTTO DA 180 A 48
-                    depths=[2, 2, 2, 2],    # RIDOTTO DA [6,6,6,6] A [2,2,2,2]
-                    num_heads=[2, 2, 2, 2], # RIDOTTO DA [6,6,6,6] A [2,2,2,2]
+                    embed_dim=180,          # MAX QUALITY (Pesante)
+                    depths=[6, 6, 6, 6, 6, 6], # MAX DEPTH (Pesante)
+                    num_heads=[6, 6, 6, 6, 6, 6], 
                     window_size=16, 
                     compress_ratio=3, 
                     squeeze_factor=30, 
@@ -80,6 +79,7 @@ class HybridSuperResolutionModel(nn.Module):
         x = self.s1(self.stage1(x))
         
         # 2. HAT: 160x160 -> 320x320
+        # Funziona senza padding perché 160 è multiplo di 16
         if self.has_stage2: 
             x = self.s2(self.stage2(x))
         
