@@ -16,6 +16,11 @@ python scripts\Modello_3_verifica.py
 python scripts\Modello_4_train.py
 
 
+cd scripts
+
+tensorboard --logdir=outputs/logs
+
+
 
 pip install tensorboard
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
