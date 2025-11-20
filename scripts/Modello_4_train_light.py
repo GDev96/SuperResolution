@@ -1,3 +1,13 @@
+"""
+MODELLO - STEP 4: TRAINING (LIGHT) - ULTIMATE LIVE + CONTINUOUS GRAPH
+Versione Light con grafico PSNR che si aggiorna AD OGNI FOTO.
+
+FEATURES:
+1. LIVE_VAL_CURRENT.png: Si sovrascrive ad ogni singola immagine.
+2. Grafico 'Live_Validation/PSNR_Continuous_Stream': 
+   Si aggiorna per OGNI FOTO (non per epoca), creando un grafico continuo in tempo reale.
+"""
+
 import argparse
 import sys
 import os
@@ -11,29 +21,25 @@ from torch.utils.tensorboard import SummaryWriter
 from pathlib import Path
 from tqdm import tqdm
 import numpy as np
+from math import log10
 
 # ============================================================================
-# 0. CONFIGURAZIONI BASE
+# 0. CONFIGURAZIONI MEMORIA
 # ============================================================================
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 if not hasattr(np, 'float'): np.float = float
 
 # ============================================================================
-# 1. CONFIGURAZIONE PATH ASSOLUTO DINAMICO (REPO ROOT)
+# 1. CONFIGURAZIONE PATH ASSOLUTO (REPO ROOT)
 # ============================================================================
-# Ottiene il path assoluto dello script corrente: .../SuperResolution/scripts/Modello_4...py
 CURRENT_SCRIPT = Path(__file__).resolve()
-
-# Risale di due livelli per trovare la root assoluta della repo:
-# scripts/ -> SuperResolution/ (ROOT)
 PROJECT_ROOT = CURRENT_SCRIPT.parent.parent
-
 print(f"📂 Repo Root Assoluta: {PROJECT_ROOT}")
 
-# Aggiunge la root al sys.path per le importazioni
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# IMPORT SPECIFICO DA SRC.LIGHT
 try:
     from src.light.architecture import HybridSuperResolutionModel
     from src.light.dataset import AstronomicalDataset
@@ -41,9 +47,7 @@ try:
     from src.light.metrics import Metrics
     print("✅ Moduli caricati correttamente da src.light")
 except ImportError as e:
-    print(f"\n❌ ERRORE IMPORT: {e}")
-    print(f"   Verifica che {PROJECT_ROOT}/src/light esista.")
-    sys.exit(1)
+    print(f"\n❌ ERRORE IMPORT: {e}"); sys.exit(1)
 
 ROOT_DATA_DIR = PROJECT_ROOT / "data"
 
@@ -53,8 +57,8 @@ ROOT_DATA_DIR = PROJECT_ROOT / "data"
 HARDWARE_CONFIG = {
     'batch_size': 1,          
     'accumulation_steps': 1,  
-    'target_lr_size': 80,     
-    'target_hr_size': 128,
+    'target_lr_size': 128,     
+    'target_hr_size': 512,
     'num_workers': 4,        
     'prefetch_factor': 2,    
 }
@@ -62,13 +66,16 @@ HARDWARE_CONFIG = {
 # ============================================================================
 # UTILS
 # ============================================================================
+def calc_psnr_tensor(pred, target):
+    """Calcola PSNR su tensori GPU senza staccarli (veloce)"""
+    mse = F.mse_loss(pred, target)
+    if mse == 0: return 100.0
+    return 10 * log10(1.0 / mse.item())
+
 def save_preview_png(lr, pred, hr, path):
-    """Salva un trittico: LR (Resize) | PRED | HR"""
-    # Ridimensiona LR alla dimensione di HR per confronto pulito
+    """Salva un trittico PNG: LR | PRED | HR"""
     lr_resized = F.interpolate(lr, size=hr.shape[2:], mode='nearest')
-    # Concatena orizzontalmente
     comparison = torch.cat((lr_resized, pred, hr), dim=3)
-    # Salva
     vutils.save_image(comparison, path, normalize=False)
 
 def select_target_directory():
@@ -96,8 +103,11 @@ def create_json_from_split_folder(split_folder):
             dims = []
             for f in fits_files:
                 with astro_fits.open(f) as hdul:
+                    if hdul[0].data is None: continue
                     shape = hdul[0].data.shape
-                    dims.append((f, shape[-2]*shape[-1] if len(shape)>=2 else shape[0]**2))
+                    if len(shape) == 3: area = shape[-2]*shape[-1]
+                    else: area = shape[0]*shape[1]
+                    dims.append((f, area))
             dims.sort(key=lambda x: x[1])
             pairs.append({"patch_id": pair_dir.name, "ground_path": str(dims[0][0]), "hubble_path": str(dims[1][0])})
         except: continue
@@ -112,24 +122,27 @@ def train(args, target_dir):
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp) if use_amp else None
     hr_size = HARDWARE_CONFIG['target_hr_size']
     
-    # --- CONFIGURAZIONE PATH OUTPUT ASSOLUTO (REPO BASED) ---
-    # Path: .../SuperResolution/outputs/tensorboard
-    png_out_dir = PROJECT_ROOT / "outputs" / "tensorboard"
-    png_out_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Cartella log classica
+    # --- SETUP PATH OUTPUT ---
     log_dir = PROJECT_ROOT / "outputs" / target_dir.name / "tensorboard_light"
     save_dir = PROJECT_ROOT / "outputs" / target_dir.name / "checkpoints_light"
+    png_out_dir = PROJECT_ROOT / "outputs" / target_dir.name / "predictions_light"
+    
     log_dir.mkdir(parents=True, exist_ok=True)
     save_dir.mkdir(parents=True, exist_ok=True)
+    png_out_dir.mkdir(parents=True, exist_ok=True)
+    
+    # File LIVE che si sovrascrivono
+    live_val_path = png_out_dir / "LIVE_VAL_CURRENT.png"
+    live_train_path = png_out_dir / "LIVE_TRAIN_STEP.png"
     
     writer = SummaryWriter(log_dir=str(log_dir))
     
     print("\n" + "="*70)
-    print("👀  LIVE PREVIEW ATTIVA (PER OGNI IMMAGINE)".center(70))
+    print("📈  MONITORAGGIO LIVE CONTINUO ATTIVO".center(70))
     print("="*70)
-    print(f"   📂 Cartella Output Assoluta: {png_out_dir}")
-    print(f"   📄 File Live (Sovrascritto): {png_out_dir / 'LIVE_PREVIEW.png'}")
+    print(f"   Log TensorBoard: {log_dir}")
+    print(f"   📄 LIVE VAL:      {live_val_path}")
+    print(f"   👉 APRI BROWSER:  http://localhost:6006/")
     print("="*70 + "\n")
     
     # --- DATASET ---
@@ -153,17 +166,22 @@ def train(args, target_dir):
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=2, pin_memory=True)
 
     # --- MODEL ---
+    print(f"\n🏗️  Model Setup (Output: {hr_size}x{hr_size})...")
     model = HybridSuperResolutionModel(smoothing=args.smoothing, device=device, output_size=hr_size).to(device)
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     criterion = CombinedLoss().to(device)
     
-    print(f"🔥 Inizio Training ({args.epochs} epoche)")
+    print(f"🔥 Inizio Training Light ({args.epochs} epoche)")
+    
     global_step = 0
+    # CONTATORE GLOBALE PER VALIDAZIONE (NON SI AZZERA MAI)
+    val_global_counter = 0 
 
     for epoch in range(args.epochs):
+        # 1. TRAIN
         model.train()
         epoch_loss = 0
-        pbar = tqdm(train_loader, desc=f"Ep {epoch+1}")
+        pbar = tqdm(train_loader, desc=f"Ep {epoch+1} Train")
         
         for batch in pbar:
             lr = batch['lr'].to(device, non_blocking=True)
@@ -185,42 +203,54 @@ def train(args, target_dir):
             epoch_loss += loss.item()
             global_step += 1
             
-            # --- SALVATAGGIO LIVE OGNI SINGOLA IMMAGINE (STEP % 1) ---
-            # Sovrascrive il file LIVE_PREVIEW.png ad ogni passo
-            save_preview_png(lr, pred, hr, png_out_dir / "LIVE_PREVIEW.png")
+            # Salva PNG LIVE Training
+            if global_step % 5 == 0: # Ogni 5 step per non rallentare troppo
+                with torch.no_grad(): save_preview_png(lr, pred, hr, live_train_path)
             
-            # Salva anche lo storico ogni 100 step per riferimento
-            if global_step % 100 == 0:
-                save_preview_png(lr, pred, hr, png_out_dir / f"step_{global_step:05d}.png")
-
-            writer.add_scalar('Loss/Train_Step', loss.item(), global_step)
+            writer.add_scalar('1_Metrics/Training_Loss', loss.item(), global_step)
             pbar.set_postfix({'loss': f"{loss.item():.4f}"})
             
-        # --- VALIDAZIONE ---
+        # 2. VALIDATION (CONTINUA E DETTAGLIATA)
         model.eval()
         metrics = Metrics()
+        
+        epoch_dir = png_out_dir / f"epoch_{epoch+1}"
+        epoch_dir.mkdir(exist_ok=True)
+
         with torch.no_grad():
-            for i, batch in enumerate(tqdm(val_loader, desc="Val", leave=False)):
+            val_pbar = tqdm(val_loader, desc=f"Ep {epoch+1} Valid", leave=False)
+            for i, batch in enumerate(val_pbar):
                 lr = batch['lr'].to(device)
                 hr = batch['hr'].to(device)
                 pred = model(lr)
+                
                 metrics.update(pred, hr)
                 
-                # Salva TUTTE le immagini di validazione in una sottocartella per epoca
-                val_epoch_dir = png_out_dir / f"epoch_{epoch}_val"
-                val_epoch_dir.mkdir(exist_ok=True)
-                save_preview_png(lr, pred, hr, val_epoch_dir / f"val_{i:03d}.png")
+                # --- GRAFICO PSNR CONTINUO (OGNI FOTO) ---
+                single_psnr = calc_psnr_tensor(pred, hr)
+                
+                # QUESTO è il grafico che cercavi: Asse X = Numero Foto Totale Processata
+                writer.add_scalar('Live_Validation/PSNR_Continuous_Stream', single_psnr, val_global_counter)
+                val_global_counter += 1 # Incremento continuo
+                
+                # Grafici per singola foto (Asse X = Epoca)
+                writer.add_scalar(f'Single_Images_Epoch_History/Img_{i:03d}', single_psnr, epoch)
 
+                # SALVATAGGIO PNG
+                save_preview_png(lr, pred, hr, live_val_path)
+                save_preview_png(lr, pred, hr, epoch_dir / f"val_{i:04d}.png")
+
+        # 3. FINE EPOCA
         res = metrics.compute()
-        print(f"   Loss: {epoch_loss/len(train_loader):.4f} | PSNR: {res['psnr']:.2f}")
+        avg_train_loss = epoch_loss/len(train_loader)
         
-        writer.add_scalar('Loss/Train_Epoch', epoch_loss/len(train_loader), epoch)
-        writer.add_scalar('Metrics/PSNR', res['psnr'], epoch)
+        writer.add_scalar('1_Metrics/Avg_Val_PSNR_Epoch', res['psnr'], epoch)
+        print(f"   Loss: {avg_train_loss:.4f} | Avg PSNR: {res['psnr']:.2f} dB")
         
         torch.save(model.state_dict(), save_dir / "last_model_light.pth")
 
     writer.close()
-    print(f"\n✅ Training Finito. Controlla {png_out_dir}")
+    print(f"\n✅ Training Finito.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -229,7 +259,7 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--smoothing', type=str, default='balanced')
-    parser.add_argument('--resize', type=int, default=128)
+    parser.add_argument('--resize', type=int, default=512)
     parser.add_argument('--use_amp', type=bool, default=True)
     args = parser.parse_args()
     

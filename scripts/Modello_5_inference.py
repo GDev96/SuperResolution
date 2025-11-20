@@ -6,6 +6,8 @@ import numpy as np
 from astropy.io import fits
 from pathlib import Path
 import torch.nn.functional as F
+import torchvision.utils as vutils
+import matplotlib.pyplot as plt
 
 # ============================================================
 # 0. FIX MEMORIA & NUMPY
@@ -14,41 +16,43 @@ if not hasattr(np, 'float'):
     np.float = float
 
 # ============================================================
-# 1. CONFIGURAZIONE PATH (CRUCIALE)
+# 1. CONFIGURAZIONE PATH (ROBUSTA PER SRC/LIGHT)
 # ============================================================
-HERE = Path(__file__).resolve().parent
-PROJECT_ROOT = HERE.parent
-MODELS_DIR = PROJECT_ROOT / "models"
+CURRENT_SCRIPT = Path(__file__).resolve()
+PROJECT_ROOT = CURRENT_SCRIPT.parent.parent  # Risale da scripts/ a root
 
-sys.path.append(str(PROJECT_ROOT))
+print(f"📂 Repo Root: {PROJECT_ROOT}")
 
-if MODELS_DIR.exists():
-    if str(MODELS_DIR) not in sys.path:
-        sys.path.insert(0, str(MODELS_DIR))
-    for subfolder in MODELS_DIR.iterdir():
-        if subfolder.is_dir() and str(subfolder) not in sys.path:
-            sys.path.insert(0, str(subfolder))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-# Ora possiamo importare
+# Importa specificamente da src.light come nel training
 try:
-    from src.architecture import HybridSuperResolutionModel
+    from src.light.architecture import HybridSuperResolutionModel
+    print("✅ Moduli caricati da src.light")
 except ImportError as e:
     print(f"❌ Errore Import Architecture: {e}")
+    print(f"   Assicurati che src/light esista in {PROJECT_ROOT}")
     sys.exit(1)
 
-def pad_image_for_hat(tensor, window_size=16):
-    """Aggiunge padding se l'immagine non è divisibile per window_size (per HAT)"""
-    _, _, h, w = tensor.shape
-    pad_h = (window_size - h % window_size) % window_size
-    pad_w = (window_size - w % window_size) % window_size
+# ============================================================
+# 2. FUNZIONI UTILI
+# ============================================================
+def save_png_preview(lr, sr, path):
+    """Salva un confronto visivo rapido in PNG"""
+    # Ridimensiona LR alle dimensioni di SR per affiancarle
+    lr_resized = F.interpolate(lr, size=sr.shape[2:], mode='nearest')
     
-    if pad_h > 0 or pad_w > 0:
-        tensor = F.pad(tensor, (0, pad_w, 0, pad_h), mode='reflect')
-    return tensor, pad_h, pad_w
+    # Crea griglia: LR | SR
+    comparison = torch.cat((lr_resized, sr), dim=3)
+    
+    # Salva
+    vutils.save_image(comparison, path, normalize=False)
+    print(f"   🖼️  PNG Preview salvata: {path}")
 
 def run(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"\n🧪 Inferenza su: {device}")
+    print(f"\n🧪 Inizio Inferenza su: {device}")
     
     ckpt_path = Path(args.checkpoint)
     in_path = Path(args.input)
@@ -57,79 +61,95 @@ def run(args):
     if not ckpt_path.exists(): print(f"❌ Checkpoint mancante: {ckpt_path}"); return
     if not in_path.exists(): print(f"❌ Input mancante: {in_path}"); return
 
-    print(f"📥 Caricamento Modello...")
-    try:
-        # Carica checkpoint
-        ckpt = torch.load(ckpt_path, map_location=device)
-        
-        # Configurazione smoothing
-        conf = ckpt.get('config', {})
-        smoothing = args.force_smoothing if args.force_smoothing else conf.get('smoothing', 'balanced')
-        print(f"   Mode: {smoothing}")
-
-        # Inizializza modello
-        model = HybridSuperResolutionModel(smoothing=smoothing, device=device)
-        model.load_state_dict(ckpt['model_state_dict'])
-        model.eval()
-    except Exception as e:
-        print(f"❌ Errore caricamento modello: {e}")
-        return
-
+    # --- 1. CARICAMENTO DATI FITS ---
     print(f"📂 Input: {in_path.name}")
     with fits.open(in_path) as hdul:
         data = hdul[0].data.astype(np.float32)
         header = hdul[0].header
 
-    # Gestione array 3D (se presente)
+    # Gestione array 3D (se presente prende il primo canale)
     if len(data.shape) == 3:
         data = data[0]
 
-    # Normalizzazione P1-P99 (Robusta)
-    p1, p99 = np.percentile(data, 1), np.percentile(data, 99)
-    norm = np.clip(data, p1, p99)
-    norm = (norm - p1) / (p99 - p1 + 1e-8)
+    # --- 2. NORMALIZZAZIONE (Coerente con Training) ---
+    # Il training usa Min-Max puro. Usiamo lo stesso qui.
+    data_clean = np.nan_to_num(data, nan=0.0)
+    min_val, max_val = np.min(data_clean), np.max(data_clean)
     
-    # Preparazione Tensore
+    if max_val - min_val < 1e-8:
+        norm = np.zeros_like(data_clean)
+    else:
+        norm = (data_clean - min_val) / (max_val - min_val)
+    
+    # Preparazione Tensore (1, 1, H, W)
     inp = torch.from_numpy(norm).unsqueeze(0).unsqueeze(0).to(device)
     
-    # Padding per HAT (Evita crash su dimensioni strane)
-    inp_padded, pad_h, pad_w = pad_image_for_hat(inp, window_size=16)
+    # Calcolo dimensioni target
+    h, w = inp.shape[2], inp.shape[3]
+    target_h = int(h * args.scale)
+    target_w = int(w * args.scale)
     
-    print(f"✨ Elaborazione... (Input: {data.shape} -> Padded: {inp_padded.shape})")
-    
-    with torch.no_grad():
-        # INFERENZA
-        out = model(inp_padded)
-        
-        # Rimozione Padding (Crop finale)
-        # Il modello scala 6.4x (approx). Calcoliamo il crop esatto.
-        # Poiché HAT fa x4 (2 stage x2) e poi interpolate finale,
-        # il padding viene amplificato.
-        
-        # Calcolo dimensione target esatta basata sull'input originale
-        h, w = data.shape
-        target_h = int(h * 6.4)
-        target_w = int(w * 6.4)
-        
-        # Interpoliamo l'output finale alla dimensione esatta desiderata
-        # Questo corregge eventuali piccoli errori di padding/scaling
-        out = F.interpolate(out, size=(target_h, target_w), mode='bicubic', align_corners=False)
+    print(f"   📏 Dimensioni: {h}x{w} -> {target_h}x{target_w} (Scale x{args.scale})")
 
-    # Denormalizzazione
+    # --- 3. CARICAMENTO MODELLO ---
+    print(f"📥 Caricamento Modello...")
+    try:
+        # Importante: Passiamo output_size al costruttore!
+        model = HybridSuperResolutionModel(
+            smoothing=args.smoothing, 
+            device=device,
+            output_size=(target_h, target_w)
+        )
+        
+        # Carica pesi
+        ckpt = torch.load(ckpt_path, map_location=device)
+        if 'model_state_dict' in ckpt:
+            model.load_state_dict(ckpt['model_state_dict'])
+        else:
+            model.load_state_dict(ckpt)
+            
+        model.eval()
+    except Exception as e:
+        print(f"❌ Errore caricamento modello: {e}")
+        return
+
+    # --- 4. INFERENZA ---
+    print(f"✨ Elaborazione...")
+    with torch.no_grad():
+        # Supporto Mixed Precision se disponibile
+        with torch.cuda.amp.autocast(enabled=(device.type == 'cuda')):
+            out = model(inp)
+            
+            # Sicurezza: Assicuriamoci che l'output sia esattamente della dimensione richiesta
+            # (Il modello lo fa già internamente, ma questo è un double-check)
+            if out.shape[-2:] != (target_h, target_w):
+                out = F.interpolate(out, size=(target_h, target_w), mode='bicubic')
+
+    # --- 5. SALVATAGGIO FITS (SCIENTIFICO) ---
     out_np = out.squeeze().cpu().numpy()
-    out_np = out_np * (p99 - p1) + p1
     
-    # Salvataggio
+    # Denormalizzazione (Riporta ai valori fisici originali)
+    out_np = out_np * (max_val - min_val) + min_val
+    
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    header['HISTORY'] = f"SR Hybrid 6.4x (Smoothing: {smoothing})"
+    header['HISTORY'] = f"SR Hybrid x{args.scale} (Smoothing: {args.smoothing})"
     fits.writeto(out_path, out_np, header, overwrite=True)
-    print(f"✅ Salvato: {out_path}")
-    print(f"   Dimensione Finale: {out_np.shape}")
+    print(f"✅ FITS Salvato: {out_path}")
+
+    # --- 6. SALVATAGGIO PNG (VISUALIZZAZIONE) ---
+    # Salviamo il confronto nella stessa cartella del fits, ma con estensione .png
+    png_path = out_path.with_suffix('.png')
+    save_png_preview(inp, out, png_path)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--checkpoint', required=True, help="Path al file .pth (best_model.pth)")
+    parser.add_argument('--checkpoint', required=True, help="Path al file .pth")
     parser.add_argument('--input', required=True, help="Path immagine FITS Low-Res")
     parser.add_argument('--output', required=True, help="Path dove salvare l'output FITS")
-    parser.add_argument('--force_smoothing', choices=['none', 'light', 'balanced', 'strong'])
-    run(parser.parse_args())
+    
+    # Parametri opzionali modificati
+    parser.add_argument('--scale', type=float, default=2.0, help="Fattore di scala (es. 2.0, 1.6)")
+    parser.add_argument('--smoothing', type=str, default='balanced', choices=['none', 'light', 'balanced', 'strong'])
+    
+    args = parser.parse_args()
+    run(args)

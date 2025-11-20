@@ -1,3 +1,8 @@
+TUTTI I FILE COPY SONO QUELLI PER LA PIPELINE LIGHT 128'':512
+
+
+
+
 SEMPRE 
 
 python scripts\Modello_0_creazioneenv.py
@@ -8,17 +13,29 @@ solo la prima volta
 
 python scripts\Modello_1_setup_environment.py
 
-SEMPRE
+
+HEAVY
+
+
 python scripts\Modello_2_prepare_data.py
 
 python scripts\Modello_3_verifica.py
 
 python scripts\Modello_4_train_heavy.py
 
+tensorboard --logdir=outputs/M33/tensorboard
+
+
+LIGHT 
+
+
+python scripts\Modello_2_prepare_data_copy.py
+
+python scripts\Modello_3_verifica_copy.py
 
 python scripts\Modello_4_train_light.py
 
-tensorboard --logdir=outputs/M33/tensorboard
+
 
 tensorboard --logdir=outputs/M33/tensorboard_light
 

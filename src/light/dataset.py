@@ -7,15 +7,21 @@ import numpy as np
 import random
 import cv2
 
-DEFAULT_LR_SIZE = (80, 80)
-DEFAULT_HR_SIZE = (512, 512)
+# ============================================================
+# CONFIGURAZIONE DIMENSIONI DEFAULT (ALLINEATE ALLE PATCH)
+# ============================================================
+DEFAULT_LR_SIZE = (128, 128)  # AGGIORNATO: Prima era (80, 80)
+DEFAULT_HR_SIZE = (512, 512)  # HR Standard
 
 class AstronomicalDataset(Dataset):
     def __init__(self, split_file, base_path, augment=True, force_hr_size=None):
         self.base_path = Path(base_path)
         self.augment = augment
         
+        # Imposta la dimensione target LR di default
         self.lr_size = DEFAULT_LR_SIZE
+        
+        # Gestione dimensione HR (se forzata dallo script di training o default)
         if force_hr_size:
              self.hr_size = (force_hr_size, force_hr_size) if isinstance(force_hr_size, int) else force_hr_size
         else:
@@ -33,6 +39,7 @@ class AstronomicalDataset(Dataset):
             with fits.open(file_path, mode='readonly', memmap=False) as hdul:
                 return hdul[0].data.astype(np.float32).copy()
         except Exception:
+            # Ritorna nero in caso di errore
             return np.zeros(self.lr_size, dtype=np.float32)
     
     def _norm(self, data):
@@ -49,8 +56,11 @@ class AstronomicalDataset(Dataset):
         lr = self._norm(lr)
         hr = self._norm(hr)
         
+        # Verifica e Resize se necessario (adatta patch anomale al target 128x128)
         if lr.shape != self.lr_size:
             lr = cv2.resize(lr, self.lr_size, interpolation=cv2.INTER_LINEAR)
+        
+        # Verifica e Resize HR (adatta al target 512x512)
         if hr.shape != self.hr_size:
             hr = cv2.resize(hr, self.hr_size, interpolation=cv2.INTER_CUBIC)
         
