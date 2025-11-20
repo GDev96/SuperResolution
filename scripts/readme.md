@@ -21,7 +21,14 @@ python scripts\Modello_2_prepare_data.py
 
 python scripts\Modello_3_verifica.py
 
+
 python scripts\Modello_4_train_heavy.py
+
+python scripts\Modello_5_inference.py
+
+
+python scripts\Modello_5_inference.py ^
+
 
 tensorboard --logdir=outputs/M33/tensorboard
 
@@ -35,7 +42,7 @@ python scripts\Modello_3_verifica_copy.py
 
 python scripts\Modello_4_train_light.py
 
-python scripts\Modello_5_inference_copy.py
+python scripts\Modello_5_inference_copy.py  DARE IN INPUT ALTRO CHIEDERE CHAT
 
 
 

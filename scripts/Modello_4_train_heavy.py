@@ -1,18 +1,15 @@
 """
-MODELLO - STEP 4: TRAINING
-Training ottimizzato per RTX 2060 (6GB VRAM) + 64GB RAM
-Usa GRADIENT ACCUMULATION: Batch 1 (fisico) -> Batch 4 (virtuale)
-Include supporto TENSORBOARD e link localhost.
-
-POSIZIONE FILE: scripts/Modello_4_train.py
+MODELLO - STEP 4: TRAINING (HEAVY) - SMART DATA & LIVE MONITOR
+Fix: Legge correttamente tutte le cartelle pair (Smart Sorting).
+Features: Live Preview PNG, TensorBoard dettagliato, Anti-Freeze.
 """
 
 import argparse
 import sys
 import os
 import json
-import warnings
 import torch
+import torch.nn.functional as F
 import torch.optim as optim
 import torchvision.utils as vutils
 from torch.utils.data import DataLoader
@@ -20,18 +17,14 @@ from torch.utils.tensorboard import SummaryWriter
 from pathlib import Path
 from tqdm import tqdm
 import numpy as np
+from math import log10
 
 # ============================================================================
-# 0. CONFIGURAZIONI MEMORIA & FIX NUMPY
+# 0. CONFIGURAZIONI BASE
 # ============================================================================
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+if not hasattr(np, 'float'): np.float = float
 
-if not hasattr(np, 'float'):
-    np.float = float
-
-# ============================================================================
-# 1. CONFIGURAZIONE PATH ASSOLUTI E DINAMICI
-# ============================================================================
 CURRENT_SCRIPT = Path(__file__).resolve()
 HERE = CURRENT_SCRIPT.parent                        
 PROJECT_ROOT = HERE.parent                          
@@ -62,77 +55,87 @@ except ImportError as e:
 ROOT_DATA_DIR = PROJECT_ROOT / "data"
 
 # ============================================================================
-# CONFIGURAZIONE HARDWARE (RTX 2060 - GRADIENT ACCUMULATION)
+# CONFIGURAZIONE HARDWARE (HEAVY)
 # ============================================================================
 HARDWARE_CONFIG = {
     'gpu_model': 'RTX 2060',
     'vram_gb': 6,
-    
     'batch_size': 1,          
     'accumulation_steps': 4,  
-    
     'use_amp': True,
-    'target_lr_size': 80,
+  'target_lr_size': 80,    # CAMBIA QUESTO (era 128)
     'target_hr_size': 512,
-    'scale_ratio': 6.4
+    'scale_ratio': 6.4,      # CAMBIA QUESTO (era 4.0)
 }
 
 # ============================================================================
-# FUNZIONI DI UTILITÀ
+# UTILS
 # ============================================================================
-def select_target_directory():
-    print("\n" + "📂"*35)
-    print("SELEZIONE DATASET PER TRAINING".center(70))
-    print("📂"*35)
+def calc_psnr_tensor(pred, target):
+    mse = F.mse_loss(pred, target)
+    if mse == 0: return 100.0
+    return 10 * log10(1.0 / mse.item())
+
+def save_preview_png(lr, pred, hr, path):
     try:
-        subdirs = [d for d in ROOT_DATA_DIR.iterdir() 
-                   if d.is_dir() and d.name not in ['splits', 'logs', '__pycache__']]
-    except Exception as e:
-        print(f"\n❌ ERRORE: {e}"); return None
+        lr_resized = F.interpolate(lr, size=hr.shape[2:], mode='nearest')
+        comparison = torch.cat((lr_resized, pred, hr), dim=3)
+        vutils.save_image(comparison, path, normalize=False)
+    except: pass
 
-    if not subdirs: print(f"\n❌ Nessun dataset trovato."); return None
-
-    valid_targets = []
-    print("\nDataset disponibili:")
-    for i, dir_path in enumerate(subdirs):
-        splits_dir = dir_path / "6_patches_from_cropped" / "splits"
-        if (splits_dir / "train").exists():
-            valid_targets.append(dir_path)
-            print(f"   {len(valid_targets)}: {dir_path.name}")
-
+def select_target_directory():
+    if not ROOT_DATA_DIR.exists(): return None
+    subdirs = [d for d in ROOT_DATA_DIR.iterdir() if d.is_dir() and d.name not in ['splits', 'logs', '__pycache__']]
+    if not subdirs: return None
+    print("\nDataset disponibili:"); valid_targets = []
+    for d in subdirs:
+        if (d / "6_patches_from_cropped" / "splits" / "train").exists():
+            valid_targets.append(d)
+            print(f"   {len(valid_targets)}: {d.name}")
     if not valid_targets: return None
-
-    while True:
-        print("\n" + "─"*70)
-        choice = input(f"👉 Seleziona (1-{len(valid_targets)}) o 'q': ").strip().lower()
-        if choice == 'q': return None
-        try:
-            idx = int(choice) - 1
-            if 0 <= idx < len(valid_targets):
-                return valid_targets[idx]
-        except ValueError: pass
+    choice = input(f"👉 Seleziona (1-{len(valid_targets)}) o 'q': ").strip().lower()
+    if choice == 'q': return None
+    try: return valid_targets[int(choice) - 1]
+    except: return None
 
 def create_json_from_split_folder(split_folder):
+    """LOGICA SMART: Trova LR e HR ordinando per dimensione, ignora file extra."""
     pairs = []
     for pair_dir in sorted(split_folder.glob("pair_*")):
         fits_files = list(pair_dir.glob("*.fits"))
-        if len(fits_files) != 2: continue
+        
+        # Se ci sono meno di 2 file, salta
+        if len(fits_files) < 2: continue
+        
         try:
             from astropy.io import fits as astro_fits
-            dims = []
+            candidates = []
             for f in fits_files:
                 with astro_fits.open(f) as hdul:
+                    if hdul[0].data is None: continue
                     shape = hdul[0].data.shape
-                    h = shape[-2] if len(shape) >= 2 else shape[0]
-                    w = shape[-1] if len(shape) >= 2 else shape[0]
-                    dims.append((f, h*w))
-            dims.sort(key=lambda x: x[1])
-            pairs.append({"patch_id": pair_dir.name, "ground_path": str(dims[0][0]), "hubble_path": str(dims[1][0])})
+                    if len(shape) == 3: area = shape[-2]*shape[-1]
+                    else: area = shape[0]*shape[1]
+                    candidates.append((f, area))
+            
+            if len(candidates) < 2: continue
+            
+            # Ordina per area: il più piccolo è LR (indice 0), il più grande è HR (indice -1)
+            candidates.sort(key=lambda x: x[1])
+            
+            lr_file = candidates[0][0]
+            hr_file = candidates[-1][0]
+            
+            pairs.append({
+                "patch_id": pair_dir.name, 
+                "ground_path": str(lr_file), 
+                "hubble_path": str(hr_file)
+            })
         except: continue
     return pairs
 
 # ============================================================================
-# TRAINING
+# TRAIN LOOP
 # ============================================================================
 def train(args, target_dir):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -140,7 +143,6 @@ def train(args, target_dir):
     scaler = None
     
     if torch.cuda.is_available():
-        torch.backends.cudnn.benchmark = True
         try:
             from torch.amp import GradScaler, autocast
             scaler = GradScaler('cuda')
@@ -152,37 +154,39 @@ def train(args, target_dir):
         use_amp = True
         print(f"\n🚀 Training su: {torch.cuda.get_device_name(0)}")
     else:
-        print("⚠️  Training su CPU (LENTO!)")
         use_amp_context = None
 
+    # SETUP OUTPUT
     save_dir = PROJECT_ROOT / "outputs" / target_dir.name / "checkpoints"
     log_dir = PROJECT_ROOT / "outputs" / target_dir.name / "tensorboard"
+    png_out_dir = PROJECT_ROOT / "outputs" / target_dir.name / "predictions_heavy"
+    
     save_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
+    png_out_dir.mkdir(parents=True, exist_ok=True)
     
-    # --- INIZIALIZZA TENSORBOARD E MOSTRA LINK ---
+    live_preview_path = png_out_dir / "LIVE_VAL_CURRENT.png"
+    live_train_path = png_out_dir / "LIVE_TRAIN_STEP.png"
+    
     writer = SummaryWriter(log_dir=str(log_dir))
     
     print("\n" + "="*70)
-    print("📈  MONITORAGGIO TENSORBOARD ATTIVO".center(70))
+    print("📈  MONITORAGGIO HEAVY ATTIVO".center(70))
     print("="*70)
-    print(f"   Cartella Log: {log_dir}")
-    print(f"   👉 APRI IL BROWSER SU: http://localhost:6006/")
-    print("-" * 70)
-    print(f"   Per avviare il server, esegui in un altro terminale:")
-    # Calcola path relativo per comando più pulito
-    try:
-        rel_log_dir = log_dir.relative_to(PROJECT_ROOT)
-    except ValueError:
-        rel_log_dir = log_dir
-    print(f"   tensorboard --logdir={rel_log_dir}")
+    print(f"   Log: {log_dir}")
+    print(f"   Live Val: {live_preview_path}")
+    print(f"   👉 APRI BROWSER: http://localhost:6006/")
     print("="*70 + "\n")
-    # ----------------------------------------------
     
-    # DATASET
+    # DATASET (SMART LOADING)
     splits_dir = target_dir / "6_patches_from_cropped" / "splits"
+    
+    print("🔍 Scansione Smart del dataset...")
     train_pairs = create_json_from_split_folder(splits_dir / "train")
     val_pairs = create_json_from_split_folder(splits_dir / "val")
+    
+    print(f"   ✅ Trovate {len(train_pairs)} coppie di training")
+    print(f"   ✅ Trovate {len(val_pairs)} coppie di validazione")
     
     temp_train = splits_dir / "temp_train_run.json"
     temp_val = splits_dir / "temp_val_run.json"
@@ -195,19 +199,13 @@ def train(args, target_dir):
     if temp_train.exists(): temp_train.unlink()
     if temp_val.exists(): temp_val.unlink()
 
-    # DATALOADER
     train_loader = DataLoader(train_ds, batch_size=HARDWARE_CONFIG['batch_size'], shuffle=True, num_workers=2, pin_memory=True, persistent_workers=True, prefetch_factor=2)
-    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=2, pin_memory=True)
-    
-    print(f"   ✅ Physical Batch: {HARDWARE_CONFIG['batch_size']}")
-    print(f"   ✅ Virtual Batch:  {HARDWARE_CONFIG['batch_size'] * HARDWARE_CONFIG['accumulation_steps']} (con Gradient Accumulation)")
+    # Val loader single thread per sicurezza salvataggio PNG
+    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=0, pin_memory=True)
 
     # MODEL
-    print(f"\n🏗️  Costruzione Modello...")
     try:
         model = HybridSuperResolutionModel(smoothing=args.smoothing, device=device)
-        params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"   📊 Parametri: {params:,}")
     except Exception as e:
         print(f"❌ ERRORE MODELLO: {e}"); return
 
@@ -218,6 +216,7 @@ def train(args, target_dir):
     best_psnr = 0.0
     start_epoch = 0
     global_step = 0
+    val_stream_step = 0
     
     if args.resume and Path(args.resume).exists():
         print(f"📥 Resume: {args.resume}")
@@ -228,17 +227,15 @@ def train(args, target_dir):
         best_psnr = ckpt.get('best_psnr', 0.0)
         global_step = ckpt.get('global_step', 0)
 
-    # LOOP CON GRADIENT ACCUMULATION
     print(f"\n🔥 Inizio Training: {start_epoch+1} -> {args.epochs} epoche")
-    print("="*70)
-    
     accumulation_steps = HARDWARE_CONFIG['accumulation_steps']
     optimizer.zero_grad(set_to_none=True) 
 
     for epoch in range(start_epoch, args.epochs):
+        # 1. TRAIN
         model.train()
         train_loss = 0
-        pbar = tqdm(train_loader, desc=f"Ep {epoch+1}")
+        pbar = tqdm(train_loader, desc=f"Ep {epoch+1} Train")
         
         for i, batch in enumerate(pbar):
             lr = batch['lr'].to(device, non_blocking=True)
@@ -263,66 +260,67 @@ def train(args, target_dir):
                 if use_amp:
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    scaler.step(optimizer)
-                    scaler.update()
+                    scaler.step(optimizer); scaler.update()
                 else:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                     optimizer.step()
-                
                 optimizer.zero_grad(set_to_none=True)
                 global_step += 1
                 
-                writer.add_scalar('Loss/train_step', current_loss, global_step)
+                if global_step % 10 == 0:
+                     with torch.no_grad(): save_preview_png(lr, pred, hr, live_train_path)
+                
+                writer.add_scalar('1_Global_Metrics/Training_Loss_Step', current_loss, global_step)
             
             pbar.set_postfix({'loss': f"{current_loss:.4f}"})
 
-        # VALIDATION
+        # 2. VALIDATION
         model.eval()
         metrics = Metrics()
-        val_loss = 0
+        epoch_dir = png_out_dir / f"epoch_{epoch+1}"
+        epoch_dir.mkdir(exist_ok=True)
         
         with torch.no_grad():
-            for i, batch in enumerate(tqdm(val_loader, desc="Val", leave=False)):
+            val_pbar = tqdm(val_loader, desc="Val Live", leave=False)
+            for i, batch in enumerate(val_pbar):
                 lr = batch['lr'].to(device)
                 hr = batch['hr'].to(device)
+                
                 if use_amp:
-                    with use_amp_context():
-                        pred = model(lr)
-                        l, _ = criterion(pred, hr)
+                    with use_amp_context(): pred = model(lr)
                 else:
                     pred = model(lr)
-                    l, _ = criterion(pred, hr)
                 
-                val_loss += l.item()
                 metrics.update(pred, hr)
                 
-                if i == 0:
-                    writer.add_images('Validation/LR', lr, epoch)
-                    writer.add_images('Validation/HR_Target', hr, epoch)
-                    writer.add_images('Validation/Prediction', pred, epoch)
+                # Live Metrics
+                val_stream_step += 1
+                single_psnr = calc_psnr_tensor(pred, hr)
+                writer.add_scalar('Live_Stream/PSNR_Continuous', single_psnr, val_stream_step)
+                writer.add_scalar(f'Single_Image_History/Img_{i:03d}', single_psnr, epoch)
 
+                # Save Images
+                save_preview_png(lr, pred, hr, live_preview_path)
+                save_preview_png(lr, pred, hr, epoch_dir / f"val_{i:04d}.png")
+
+        # 3. END EPOCH
         res = metrics.compute()
         avg_train_loss = train_loss / len(train_loader)
         
-        writer.add_scalar('Loss/train_epoch', avg_train_loss, epoch)
-        writer.add_scalar('Metrics/PSNR', res['psnr'], epoch)
-        writer.add_scalar('Metrics/SSIM', res['ssim'], epoch)
-        writer.add_scalar('LearningRate', optimizer.param_groups[0]['lr'], epoch)
+        writer.add_scalar('1_Global_Metrics/Training_Loss_Epoch', avg_train_loss, epoch)
+        writer.add_scalar('1_Global_Metrics/Average_Validation_PSNR', res['psnr'], epoch)
         
-        print(f"   Loss: {avg_train_loss:.4f} | PSNR: {res['psnr']:.2f} dB | SSIM: {res['ssim']:.4f}")
+        print(f"   Loss: {avg_train_loss:.4f} | PSNR: {res['psnr']:.2f} dB")
         
         if res['psnr'] > best_psnr:
             best_psnr = res['psnr']
             torch.save({'epoch': epoch, 'model_state_dict': model.state_dict(), 'optimizer': optimizer.state_dict(), 'best_psnr': best_psnr, 'global_step': global_step}, save_dir / "best_model.pth")
-            print("   🏆 Best Model!")
             
         if (epoch + 1) % 10 == 0:
             torch.save({'epoch': epoch, 'model_state_dict': model.state_dict()}, save_dir / f"ckpt_ep{epoch+1}.pth")
 
         scheduler.step(res['psnr'])
-        
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        if torch.cuda.is_available(): torch.cuda.empty_cache()
 
     writer.close() 
     print("\n✅ Training Completato!")
