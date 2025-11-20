@@ -20,6 +20,8 @@ python scripts\Modello_4_train_light.py
 
 tensorboard --logdir=outputs/M33/tensorboard
 
+tensorboard --logdir=outputs/M33/tensorboard_light
+
 
 
 pip install tensorboard
@@ -30,4 +32,4 @@ pip install einops timm
 
 
 
-(Versione HAT-Light per architettura se crusha
+Versione HAT-Light per architettura se crusha
