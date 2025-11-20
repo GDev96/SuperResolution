@@ -21,11 +21,10 @@ from tqdm import tqdm
 HERE = Path(__file__).resolve().parent  # scripts/
 PROJECT_ROOT = HERE.parent               # SuperResolution/
 ROOT_DATA_DIR = PROJECT_ROOT / "data"
-
-# DIMENSIONI TARGET - Ottimizzate per RTX 2060 (6GB VRAM)
+# DIMENSIONI TARGET - AGGIORNATE PER HAT (80x80)
 TARGET_HR_SIZE = 512  # Hubble HR patches
-TARGET_LR_SIZE = 34   # Ground LR patches
-SCALE_RATIO = 15      # Rapporto di scala (512/34 ≈ 15)
+TARGET_LR_SIZE = 80   # Ground LR patches (Prima era 34)
+SCALE_RATIO = 6.4     # Rapporto di scala (512/80 = 6.4)
 
 print(f"📂 Project Root: {PROJECT_ROOT}")
 print(f"📂 Data Dir:     {ROOT_DATA_DIR}")

@@ -1,6 +1,7 @@
 SEMPRE 
 
-python scripts\Modello_creazione.py
+python scripts\Modello_0_creazioneenv.py
+
 
 
 solo la prima volta
@@ -20,3 +21,4 @@ pip install tensorboard
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 pip install scipy pyyaml lmdb addict future yapf "numpy<2.0"
 pip install opencv-python lmdb addict future yapf
+pip install einops timm

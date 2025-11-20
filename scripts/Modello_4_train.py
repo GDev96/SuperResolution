@@ -81,10 +81,11 @@ HARDWARE_CONFIG = {
     'ram_gb': 64,
     'recommended_batch_size': 4,
     'max_batch_size': 6,
-    'use_amp': True,           # Mixed Precision attiva
-    'target_lr_size': 34,
+    'use_amp': True,
+    'target_lr_size': 80,     # <--- MODIFICATO DA 34 A 80
     'target_hr_size': 512,
-    'scale_ratio': 15
+    'scale_ratio': 6.4        # <--- MODIFICATO (512/80)
+
 }
 
 # ============================================================================

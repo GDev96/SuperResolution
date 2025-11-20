@@ -27,17 +27,21 @@ class AntiCheckerboardLayer(nn.Module):
     def forward(self, x): return self.conv(x)
 
 class HybridSuperResolutionModel(nn.Module):
-    def __init__(self, target_scale=15, smoothing='balanced', device='cuda'):
+    def __init__(self, target_scale=None, smoothing='balanced', device='cuda'):
         super().__init__()
-        self.target_scale = target_scale
-        self.model_scale = 2
+        # target_scale è ignorato qui perché fissato a 512px output
         
         if RRDBNet is None: raise ImportError("BasicSR mancante.")
+        
+        # Stage 1: RRDBNet (Upscale x2)
+        # Input 80 -> 160
         self.stage1 = RRDBNet(num_in_ch=1, num_out_ch=1, num_feat=64, num_block=23, num_grow_ch=32, scale=2)
         
         self.has_stage2 = False
         self.stage2 = nn.Identity()
         
+        # Stage 2: HAT (Upscale x2)
+        # Input 160 -> 320
         if HAT_Arch:
             try:
                 self.stage2 = HAT_Arch(img_size=64, patch_size=1, in_chans=1, embed_dim=180, depths=[6]*6, 
@@ -45,7 +49,6 @@ class HybridSuperResolutionModel(nn.Module):
                                        conv_scale=0.01, overlap_ratio=0.5, mlp_ratio=2., qkv_bias=True, 
                                        upscale=2, img_range=1., upsampler='pixelshuffle', resi_connection='1conv')
                 self.has_stage2 = True
-                self.model_scale = 4
             except: pass
 
         if smoothing != 'none':
@@ -58,10 +61,15 @@ class HybridSuperResolutionModel(nn.Module):
         self.to(device)
 
     def forward(self, x):
+        # 1. BasicSR: 80x80 -> 160x160
         x = self.s1(self.stage1(x))
-        if self.has_stage2: x = self.s2(self.stage2(x))
         
-        _, _, h, w = x.shape
-        th, tw = int(h * self.target_scale / self.model_scale), int(w * self.target_scale / self.model_scale)
-        x = F.interpolate(x, size=(th, tw), mode='bicubic', align_corners=False, antialias=True)
+        # 2. HAT: 160x160 -> 320x320
+        # 160 è divisibile per 16, quindi HAT funziona senza padding!
+        if self.has_stage2: 
+            x = self.s2(self.stage2(x))
+        
+        # 3. Interpolazione Finale: 320x320 -> 512x512
+        x = F.interpolate(x, size=(512, 512), mode='bicubic', align_corners=False, antialias=True)
+        
         return self.sf(x)
