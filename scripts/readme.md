@@ -1,6 +1,14 @@
+Dataset_step2_1,33 creare il mosaico basta avere la cartella del osservatorio 
+Dataset_step2_42 creare il mosaico basta avere la cartella del hubble 
+
+lo step 2 non incrocia hubble e osservatorio, verranno incrociati nel file 3 per fare le patch
+
+
+MODELLO
+
 TUTTI I FILE COPY SONO QUELLI PER LA PIPELINE LIGHT 128'':512
 
-
+TUTTI I FILE NORMALE SONO QUELLI PER LA PIPELINE LIGHT 80'':512
 
 
 SEMPRE 
