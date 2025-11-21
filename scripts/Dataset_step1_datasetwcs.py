@@ -250,9 +250,9 @@ def calculate_pixel_scale(header):
     xbin = header.get('XBINNING', 1)
     
     if xpixsz and focal:
-        # Formula: pixel_scale (arcsec/px) = 206.265 * pixel_size (mm) / focal_length (mm)
+        # Formula: pixel_scale (arcsec/px) = 206265 * pixel_size (mm) / focal_length (mm)
         pixel_size_mm = (xpixsz * xbin) / 1000.0  # converti micron -> mm e applica binning
-        pixel_scale_arcsec = 206.265 * pixel_size_mm / focal
+        pixel_scale_arcsec = 206265 * pixel_size_mm / focal
         pixel_scale_deg = pixel_scale_arcsec / 3600.0
         return pixel_scale_deg
     
