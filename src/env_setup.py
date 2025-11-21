@@ -1,44 +1,47 @@
 import sys
 import os
 from pathlib import Path
-import traceback
 
 def setup_paths():
-    # Calcola la root: .../SuperResolution/
+    # 1. Trova la root del progetto
+    # Tentativo A: Relativo a questo file
     SRC_DIR = Path(__file__).resolve().parent
     PROJECT_ROOT = SRC_DIR.parent
     
-    print(f"\n🔍 CONFIGURAZIONE PATH INTELLIGENTE:")
+    # Tentativo B: Assoluto standard RunPod (Fallback sicuro)
+    RUNPOD_ROOT = Path("/root/SuperResolution")
+    if RUNPOD_ROOT.exists():
+        PROJECT_ROOT = RUNPOD_ROOT
+
+    print(f"\n🔍 CONFIGURAZIONE PATH (Root: {PROJECT_ROOT})")
     
-    # 1. Aggiungi Models Root
+    # 2. Aggiungi Models Root
     models_root = PROJECT_ROOT / "models"
     if str(models_root) not in sys.path:
         sys.path.insert(0, str(models_root))
 
-    # 2. Cerca e aggiungi BasicSR
+    # 3. Cerca e aggiungi BasicSR
+    # Cerca ricorsivamente perché la struttura potrebbe variare dopo git clone
     basicsr_path = list(models_root.rglob("rrdbnet_arch.py"))
     if basicsr_path:
-        # Prendi la cartella padre di 'basicsr' (es: .../models/BasicSR)
-        # basicsr_path[0] è .../basicsr/archs/rrdbnet_arch.py
-        # .parent -> archs
-        # .parent -> basicsr (package)
-        # .parent -> ROOT DA AGGIUNGERE
+        # Risaliamo fino alla root che contiene 'basicsr'
         bsr_root = basicsr_path[0].parent.parent.parent
         if str(bsr_root) not in sys.path:
             sys.path.insert(0, str(bsr_root))
-            print(f"   ✅ BasicSR trovato in: {bsr_root}")
+            print(f"   ✅ BasicSR collegato: {bsr_root}")
+    else:
+        print("   ⚠️  BasicSR non trovato in models/!")
 
-    # 3. Cerca e aggiungi HAT (Fix 'archs' not found)
+    # 4. Cerca e aggiungi HAT
     hat_path = list(models_root.rglob("hat_arch.py"))
     if hat_path:
-        # hat_path[0] è .../hat/archs/hat_arch.py
-        # Vogliamo aggiungere la cartella che contiene il pacchetto 'hat'
+        # Risaliamo fino alla root che contiene 'hat'
         hat_root = hat_path[0].parent.parent.parent
         if str(hat_root) not in sys.path:
             sys.path.insert(0, str(hat_root))
-            print(f"   ✅ HAT trovato in: {hat_root}")
+            print(f"   ✅ HAT collegato: {hat_root}")
     else:
-        print("   ⚠️  File 'hat_arch.py' non trovato in models!")
+        print("   ⚠️  HAT non trovato in models/!")
 
 setup_paths()
 
@@ -49,25 +52,19 @@ def import_external_archs():
     # --- IMPORT BASICSR ---
     try:
         from basicsr.archs.rrdbnet_arch import RRDBNet
-    except Exception as e:
-        print(f"   ❌ BasicSR Import Error: {e}")
+    except ImportError:
+        print("   ❌ Errore import BasicSR. Controlla path e installazione.")
 
     # --- IMPORT HAT ---
-    print("   🔍 Caricamento HAT...", end=" ")
     try:
         # Prova import standard
         from hat.archs.hat_arch import HAT
-        print("OK (Standard)")
     except ImportError:
         try:
-            # Fix per alcune versioni di repo HAT
+            # Fallback per alcune strutture folder
             import hat.archs.hat_arch as hat_module
             HAT = hat_module.HAT
-            print("OK (Modulo Diretto)")
         except Exception as e:
-            print(f"\n   ⚠️  HAT disabilitato: {e}")
-            print("      (Assicurati di aver fatto: pip install einops timm)")
-    except Exception as e:
-        print(f"\n   ⚠️  HAT Error: {e}")
+            print(f"   ⚠️  HAT non caricato: {e}")
 
     return RRDBNet, HAT

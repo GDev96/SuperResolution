@@ -1,0 +1,192 @@
+"""
+STEP 3: ESTRAZIONE PATCH (LIMITATA A 50 PER TEST)
+Logica: Estrae Hubble e Osservatorio a 512x512.
+MODIFICA: LIMIT_SAVE = 50 (Si ferma dopo aver trovato 50 coppie valide).
+"""
+
+import sys
+import os
+import shutil
+import logging
+import numpy as np
+from pathlib import Path
+from astropy.io import fits
+from astropy.wcs import WCS
+from tqdm import tqdm
+import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Import reproject
+try:
+    from reproject import reproject_interp
+except ImportError:
+    print("❌ ERRORE: Manca 'reproject'. Installa con: pip install reproject")
+    sys.exit(1)
+
+warnings.filterwarnings('ignore')
+
+# ============================================================================
+# CONFIGURAZIONE UTENTE (MODIFICATA PER TEST VELOCE)
+# ============================================================================
+SIZE_CROP = 512         
+STRIDE = 64             
+VALID_THRESHOLD = 0.95  
+MIN_SIGMA_THRESHOLD = 0.005 
+
+# 🛑 QUI IMPOSTIAMO IL LIMITE 🛑
+LIMIT_SAVE = 50       # Si ferma a 50 coppie!
+
+NUM_WORKERS = min(32, os.cpu_count() + 4)
+
+# ============================================================================
+# PERCORSI
+# ============================================================================
+CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
+ROOT_DATA_DIR = CURRENT_SCRIPT_DIR.parent / "data"
+
+# ============================================================================
+# UTILS
+# ============================================================================
+def setup_logging():
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(message)s',
+        handlers=[logging.StreamHandler()]
+    )
+    return logging.getLogger(__name__)
+
+def is_valid_patch(data):
+    if data is None or data.size == 0: return False
+    
+    # 1. Controllo NaN/Zeri
+    invalid = np.isnan(data) | (data == 0)
+    valid_ratio = 1.0 - (np.sum(invalid) / data.size)
+    if valid_ratio < VALID_THRESHOLD: return False
+
+    # 2. Controllo Struttura (Sigma)
+    try:
+        valid_data = data[~np.isnan(data) & (data != 0)]
+        if valid_data.size < 100: return False
+        min_v, max_v = valid_data.min(), valid_data.max()
+        if max_v - min_v > 1e-8:
+             valid_data_norm = (valid_data - min_v) / (max_v - min_v)
+             if valid_data_norm.std() < MIN_SIGMA_THRESHOLD: return False 
+        else: return False
+    except: return False
+        
+    return True
+
+# ============================================================================
+# WORKER THREAD
+# ============================================================================
+def process_single_patch(args):
+    y, x, data_h, header_h, data_o, wcs_o = args
+    
+    # 1. Estrazione Hubble
+    patch_h = data_h[y:y+SIZE_CROP, x:x+SIZE_CROP].copy()
+    if not is_valid_patch(patch_h): return False, None, None, None, None
+
+    # Header Crop
+    header_crop = header_h.copy()
+    header_crop['NAXIS1'] = SIZE_CROP
+    header_crop['NAXIS2'] = SIZE_CROP
+    header_crop['CRPIX1'] -= x
+    header_crop['CRPIX2'] -= y
+    for k in ['LTV1', 'LTV2', 'LTM1_1']: 
+        if k in header_crop: del header_crop[k]
+
+    # 2. Riproiezione Osservatorio
+    try:
+        patch_o, footprint = reproject_interp(
+            (data_o, wcs_o), 
+            header_crop, 
+            shape_out=(SIZE_CROP, SIZE_CROP),
+            order='bilinear'
+        )
+    except: return False, None, None, None, None
+
+    if not is_valid_patch(patch_o): return False, None, None, None, None
+    
+    return True, patch_h, patch_o, header_crop, header_crop
+
+# ============================================================================
+# CORE PROCESS
+# ============================================================================
+def process_target(base_dir, logger):
+    target_name = base_dir.name
+    mosaic_dir = base_dir / '5_mosaics'
+    output_dir = base_dir / '6_patches_aligned'
+    
+    f_hub = mosaic_dir / 'final_mosaic_hubble.fits'
+    f_obs = mosaic_dir / 'final_mosaic_observatory.fits'
+
+    print("\n" + "✂️ "*35)
+    print(f"TARGET: {target_name} (LIMITE: {LIMIT_SAVE} COPPIE)".center(70))
+    print("✂️ "*35)
+
+    if not f_hub.exists() or not f_obs.exists():
+        logger.error("Mosaici non trovati.")
+        return
+
+    print("   ⏳ Caricamento Mosaici...")
+    with fits.open(f_hub) as h: data_h = h[0].data.astype(np.float32); header_h = h[0].header
+    if data_h.ndim == 3: data_h = data_h[0]
+
+    with fits.open(f_obs) as h: data_o = h[0].data.astype(np.float32); header_o = h[0].header; wcs_o = WCS(header_o)
+    if data_o.ndim == 3: data_o = data_o[0]
+
+    if output_dir.exists(): shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True)
+
+    ny, nx = data_h.shape
+    y_range = range(0, ny - SIZE_CROP + 1, STRIDE)
+    x_range = range(0, nx - SIZE_CROP + 1, STRIDE)
+    
+    tasks = []
+    for y in y_range:
+        for x in x_range:
+            tasks.append((y, x, data_h, header_h, data_o, wcs_o))
+        
+    print(f"   Patch potenziali: {len(tasks)}...")
+    print(f"   🚀 Avvio Threading (Stop a {LIMIT_SAVE} salvataggi)...")
+
+    saved_count = 0
+    
+    # Esecuzione
+    with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
+        # Sottometti tutto ma processa finché non raggiungi il limite
+        futures = [executor.submit(process_single_patch, t) for t in tasks]
+        
+        with tqdm(total=LIMIT_SAVE, unit="patch") as pbar:
+            for future in as_completed(futures):
+                # Se abbiamo raggiunto il limite, cancella i futuri rimanenti e esci
+                if saved_count >= LIMIT_SAVE:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
+                
+                try:
+                    valid, p_h, p_o, h_hr, _ = future.result()
+                    if valid:
+                        pair_folder = output_dir / f"pair_{saved_count:05d}"
+                        pair_folder.mkdir(exist_ok=True)
+                        fits.PrimaryHDU(data=p_h, header=h_hr).writeto(pair_folder / "hubble.fits", overwrite=True)
+                        fits.PrimaryHDU(data=p_o, header=h_hr).writeto(pair_folder / "observatory.fits", overwrite=True)
+                        saved_count += 1
+                        pbar.update(1)
+                except: pass
+
+    print(f"\n✅ Completato. Salvate {saved_count} coppie.")
+
+def main():
+    logger = setup_logging()
+    subdirs = [d for d in ROOT_DATA_DIR.iterdir() if d.is_dir() and d.name not in ['splits', 'logs']]
+    if not subdirs: return
+    print("Seleziona Target:")
+    for i, d in enumerate(subdirs): print(f"{i+1}: {d.name}")
+    try:
+        sel = int(input(">> ")) - 1
+        if 0 <= sel < len(subdirs): process_target(subdirs[sel], logger)
+    except: print("Err")
+
+if __name__ == "__main__":
+    main()

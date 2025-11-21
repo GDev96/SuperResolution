@@ -1,6 +1,7 @@
 """
 Dataset per Super-Resolution Astronomica
 Versione HAT OPTIMIZED: 80x80 -> 512x512
+Ottimizzato per RunPod High-Performance Dataloading
 """
 
 import torch
@@ -12,14 +13,19 @@ import numpy as np
 import random
 import cv2
 
+# OTTIMIZZAZIONE CRITICA PER RUNPOD / LINUX
+# Evita conflitti tra i thread di PyTorch DataLoader e quelli di OpenCV.
+# Senza questo, con num_workers alti, il training rallenta drasticamente.
+cv2.setNumThreads(0)
+
 # DIMENSIONI FORZATE PER HAT
-# 80 è perfetto perché divisibile per 16 (window size)
 FIXED_LR_SIZE = (80, 80)
 FIXED_HR_SIZE = (512, 512)
 
 class AstronomicalDataset(Dataset):
     def __init__(self, split_file, base_path, augment=True):
-        self.base_path = Path(base_path)
+        # Forza path assoluto per sicurezza
+        self.base_path = Path(base_path).resolve()
         self.augment = augment
         
         with open(split_file, 'r') as f:
@@ -29,8 +35,10 @@ class AstronomicalDataset(Dataset):
         print(f"   🔧 Force Resize: LR {FIXED_LR_SIZE} -> HR {FIXED_HR_SIZE}")
     
     def _load(self, path):
-        if Path(path).is_absolute():
-            file_path = Path(path)
+        # Gestione robusta dei path (assoluti vs relativi)
+        path_obj = Path(path)
+        if path_obj.is_absolute():
+            file_path = path_obj
         else:
             file_path = self.base_path / path
         
@@ -43,6 +51,7 @@ class AstronomicalDataset(Dataset):
             return np.zeros(FIXED_LR_SIZE, dtype=np.float32)
     
     def _norm(self, data):
+        # Normalizzazione veloce
         data_clean = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
         min_val = np.min(data_clean)
         max_val = np.max(data_clean)
@@ -59,28 +68,32 @@ class AstronomicalDataset(Dataset):
         lr = self._norm(lr)
         hr = self._norm(hr)
         
-        # 2. FORCE RESIZE (Sicurezza)
-        # Se i dati sono già 80x80 (da Step 3), questo non farà danni.
+        # 2. FORCE RESIZE (Sicurezza dimensionale per HAT)
+        # OpenCV è molto veloce qui, specialmente con setNumThreads(0)
         if lr.shape != FIXED_LR_SIZE:
             lr = cv2.resize(lr, FIXED_LR_SIZE, interpolation=cv2.INTER_LINEAR)
         if hr.shape != FIXED_HR_SIZE:
             hr = cv2.resize(hr, FIXED_HR_SIZE, interpolation=cv2.INTER_CUBIC)
         
-        # 3. DATA AUGMENTATION
+        # 3. DATA AUGMENTATION (Flip & Rotate)
         if self.augment:
+            # Random Flip
             if random.random() < 0.5:
-                lr = np.flipud(lr).copy()
-                hr = np.flipud(hr).copy()
+                lr = np.flipud(lr)
+                hr = np.flipud(hr)
             if random.random() < 0.5:
-                lr = np.fliplr(lr).copy()
-                hr = np.fliplr(hr).copy()
+                lr = np.fliplr(lr)
+                hr = np.fliplr(hr)
+            
+            # Random Rotate (0, 90, 180, 270)
             k = random.randint(0, 3)
             if k > 0:
-                lr = np.rot90(lr, k).copy()
-                hr = np.rot90(hr, k).copy()
+                lr = np.rot90(lr, k)
+                hr = np.rot90(hr, k)
         
-        lr = np.ascontiguousarray(lr)
-        hr = np.ascontiguousarray(hr)
+        # Importante: ascontiguousarray evita warning di PyTorch e copie extra in memoria
+        lr = np.ascontiguousarray(lr.copy())
+        hr = np.ascontiguousarray(hr.copy())
         
         return {
             'lr': torch.from_numpy(lr).unsqueeze(0),

@@ -1,8 +1,8 @@
 """
-TRAINING A6000 BUNKER EDITION (48GB VRAM)
-Configurazione Blindata anti-OOM (Out Of Memory).
-Batch Size: 2 (Bassissimo per sicurezza)
-Accumulation: 16 (Per simulare un Batch Size efficace di 32)
+TRAINING A6000 BUNKER EDITION (48GB VRAM) + TENSORBOARD IMAGES
+Configurazione Blindata anti-OOM.
+Batch Size: 2 | Accumulation: 16
+NOVITÀ: Le immagini di preview vengono caricate su TensorBoard.
 """
 
 import argparse
@@ -22,7 +22,6 @@ from torch.cuda.amp import GradScaler
 # ============================================================================
 # 1. CONFIGURAZIONE HARDWARE BLINDATA
 # ============================================================================
-# Gestione memoria aggressiva
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 # Abilita TF32
@@ -30,14 +29,14 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.benchmark = True
 
-# CPU Workers (Riduciamo leggermente per non stressare la RAM di sistema)
+# CPU Workers
 CPU_CORES = os.cpu_count() or 16
 WORKERS = min(16, CPU_CORES) 
 
-# CONFIGURAZIONE DI SICUREZZA
+# CONFIGURAZIONE DI SICUREZZA (Batch 2 / Accum 16)
 HARDWARE_CONFIG = {
-    'batch_size': 2,           # <--- RIDOTTO AL MINIMO SICURO
-    'accum_steps': 16,         # <--- AUMENTATO: 2 * 16 = 32 (Batch Efficace)
+    'batch_size': 2,           
+    'accum_steps': 16,         
     'target_hr_size': 512,
 }
 
@@ -92,12 +91,11 @@ def create_json_files_if_missing(split_dir):
 # ============================================================================
 def train(args, target_dir):
     device = torch.device('cuda')
-    torch.cuda.empty_cache() # Pulizia iniziale
+    torch.cuda.empty_cache() 
     
-    print(f"\n🚀 START TRAIN A6000 BUNKER: {target_dir.name}")
+    print(f"\n🚀 START TRAIN A6000 BUNKER + TB IMAGES: {target_dir.name}")
     eff_batch = HARDWARE_CONFIG['batch_size'] * HARDWARE_CONFIG['accum_steps']
-    print(f"   ⚡ Batch Fisico: {HARDWARE_CONFIG['batch_size']} | Accumulo: {HARDWARE_CONFIG['accum_steps']}")
-    print(f"   🔥 Batch Efficace: {eff_batch} (Qualità garantita)")
+    print(f"   🔥 Batch Efficace: {eff_batch}")
     
     out_dir = PROJECT_ROOT / "outputs" / target_dir.name
     save_dir = out_dir / "checkpoints"
@@ -163,20 +161,16 @@ def train(args, target_dir):
         pbar = tqdm(train_loader, desc=f"Ep {epoch+1}/{args.epochs}", unit="batch")
         
         for i, batch in enumerate(pbar):
-            # Sposta dati su GPU
             lr = batch['lr'].to(device, non_blocking=True) 
             hr = batch['hr'].to(device, non_blocking=True)
             
-            # Calcolo Loss
             with torch.amp.autocast('cuda'):
                 pred = model(lr) 
                 loss, _ = criterion(pred, hr)
-                loss = loss / accum_steps # Normalizza per accumulo
+                loss = loss / accum_steps 
             
-            # Backward
             scaler.scale(loss).backward()
             
-            # Step Optimizer
             if (i + 1) % accum_steps == 0:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -194,7 +188,7 @@ def train(args, target_dir):
         avg_loss = epoch_loss / len(train_loader)
         writer.add_scalar('Train/Loss_Epoch', avg_loss, epoch)
         
-        # VALIDATION
+        # VALIDATION & IMAGE LOGGING
         model.eval()
         val_loss = 0
         metrics = Metrics()
@@ -211,10 +205,22 @@ def train(args, target_dir):
                 val_loss += v_loss.item()
                 metrics.update(pred, hr)
                 
+                # === SALVATAGGIO IMMAGINI (DISK + TENSORBOARD) ===
                 if i == 0: 
+                    # Upscale semplice dell'input per confronto visivo (Nearest Neighbor)
                     lr_up = F.interpolate(lr, size=(512,512), mode='nearest')
+                    
+                    # Unisci: Input(Sgranato) | Predizione(AI) | Target(Hubble)
                     comp = torch.cat((lr_up, pred, hr), dim=3)
+                    
+                    # 1. Salva su DISCO
                     vutils.save_image(comp, img_dir / f"val_ep_{epoch+1}.png", normalize=False)
+                    
+                    # 2. Manda a TENSORBOARD (Tab IMAGES)
+                    # .squeeze(0) rimuove la dimensione batch [1, C, H, W] -> [C, H, W]
+                    # .clamp(0, 1) assicura che i colori non siano "bruciati" nel visualizzatore
+                    writer.add_image('Validation/Preview (Input | AI | Target)', comp.squeeze(0).clamp(0, 1), epoch)
+                # =================================================
             
         res = metrics.compute()
         avg_val_loss = val_loss / len(val_loader)

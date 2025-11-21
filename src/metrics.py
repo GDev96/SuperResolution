@@ -2,35 +2,27 @@ import torch
 import torch.nn.functional as F
 from math import exp
 
+# ============================================================================
+# FUNZIONI DI SUPPORTO PER SSIM (MANCAVANO PRIMA)
+# ============================================================================
 def gaussian(window_size, sigma):
+    """Genera una gaussiana 1D."""
     gauss = torch.Tensor([exp(-(x - window_size // 2) ** 2 / float(2 * sigma ** 2)) for x in range(window_size)])
     return gauss / gauss.sum()
 
 def create_window(window_size, channel):
+    """Crea una finestra 2D gaussiana per il calcolo SSIM."""
     _1D_window = gaussian(window_size, 1.5).unsqueeze(1)
     _2D_window = _1D_window.mm(_1D_window.t()).float().unsqueeze(0).unsqueeze(0)
-    window = _2D_window.expand(channel, 1, window_size, window_size).contiguous()
+    window = torch.Tensor(_2D_window.expand(channel, 1, window_size, window_size).contiguous())
     return window
 
-def ssim_torch(img1, img2, window_size=11, window=None, size_average=True, val_range=None):
-    # Gestione del range di valori (se le immagini sono [0,1] o [0,255])
-    if val_range is None:
-        if torch.max(img1) > 128:
-            max_val = 255
-        else:
-            max_val = 1
-            
-        if torch.min(img1) < -0.5:
-            min_val = -1
-            max_val = 2  # Range [-1, 1] -> estensione 2
-        else:
-            min_val = 0
-
-        L = max_val - min_val
-    else:
-        L = val_range
-
-    padd = 0
+# ============================================================================
+# METRICHE STANDARD
+# ============================================================================
+def ssim_torch(img1, img2, window_size=11, window=None, size_average=True, val_range=1.0):
+    L = val_range
+    padd = window_size // 2  # Padding corretto basato sulla dimensione finestra
     (_, channel, _, _) = img1.size()
     
     # Crea la finestra se non passata
@@ -38,11 +30,10 @@ def ssim_torch(img1, img2, window_size=11, window=None, size_average=True, val_r
         real_size = min(window_size, img1.size(2), img1.size(3))
         window = create_window(real_size, channel)
         
-    # --- FIX IMPORTANTE: Assicura che window sia su stesso device e dtype delle immagini ---
     if window.device != img1.device or window.dtype != img1.dtype:
         window = window.to(img1.device).type_as(img1)
-    # ------------------------------------------------------------------------------------
-
+    
+    # Calcoli SSIM (Convoluzioni)
     mu1 = F.conv2d(img1, window, padding=padd, groups=channel)
     mu2 = F.conv2d(img2, window, padding=padd, groups=channel)
 
@@ -74,21 +65,22 @@ class Metrics:
         """
         Aggiorna le metriche con un batch di predizioni e target.
         """
-        # Assicurati che siano float32 per il calcolo delle metriche per massima precisione
-        # Questo evita anche problemi con HalfTensor se la metrica non lo supporta bene
         p = pred.detach().float()
         t = target.detach().float()
         
-        batch_size = p.size(0)
+        # Clamp a [0, 1] per stabilità
+        p_norm = torch.clamp(p, 0.0, 1.0)
+        t_norm = torch.clamp(t, 0.0, 1.0)
+        
+        batch_size = p_norm.size(0)
         
         # PSNR
-        mse = F.mse_loss(p, t, reduction='none').view(batch_size, -1).mean(1)
-        # Evita log(0)
+        mse = F.mse_loss(p_norm, t_norm, reduction='none').view(batch_size, -1).mean(1)
         mse = torch.clamp(mse, min=1e-8)
         self.psnr += (10 * torch.log10(1.0 / mse)).sum().item()
         
         # SSIM
-        self.ssim += ssim_torch(p, t).item() * batch_size
+        self.ssim += ssim_torch(p_norm, t_norm, val_range=1.0).item() * batch_size
         
         self.count += batch_size
 
