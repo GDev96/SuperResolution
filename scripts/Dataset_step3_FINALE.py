@@ -26,8 +26,16 @@ from skimage.transform import resize
 from reproject import reproject_interp
 from tqdm import tqdm
 import warnings
+import subprocess
 
 warnings.filterwarnings('ignore')
+
+# ================= CONFIGURAZIONE PATH PORTABILE =================
+# La radice del progetto è sempre la cartella sopra lo script (assumendo 'scripts/...')
+CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
+ROOT_DATA_DIR = PROJECT_ROOT / "data"
+# =================================================================
 
 # ================= CONFIGURAZIONE =================
 HR_SIZE = 512         
@@ -35,30 +43,14 @@ LR_SIZE = 80
 STRIDE = 64           
 
 # SOGLIE DI QUALITÀ
-MIN_PIXEL_VALUE = 0.0001 # Valore minimo per considerare un pixel "pieno"
-MIN_COVERAGE = 0.95      # 95% della patch deve essere piena (NO BORDI)
+MIN_PIXEL_VALUE = 0.0001 
+MIN_COVERAGE = 0.95      
 
 SAVE_MAP_EVERY_N = 5  
 
-CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
-ROOT_DATA_DIR = PROJECT_ROOT / "data"
+# --- FUNZIONI DI NORMALIZZAZIONE E PLOT (OMESSE per brevità, codice invariato) ---
+# ... (Mantieni le funzioni qui: get_global_normalization, normalize_with_limits, normalize_local, save_8panel_card) ...
 
-def select_target_directory():
-    print("\n" + "📂"*35)
-    print("SELEZIONE CARTELLA TARGET (Filtro 95%)".center(70))
-    print("📂"*35)
-    subdirs = [d for d in ROOT_DATA_DIR.iterdir() if d.is_dir() and d.name not in ['splits', 'logs', '__pycache__']]
-    if not subdirs: return None
-    for i, d in enumerate(subdirs):
-        print(f"   {i+1}: {d.name}")
-    try:
-        choice = int(input(f"\n👉 Seleziona (1-{len(subdirs)}): ").strip())
-        if 0 < choice <= len(subdirs): return subdirs[choice-1]
-    except: pass
-    return None
-
-# --- FUNZIONI DI NORMALIZZAZIONE E PLOT (Invariate per brevità, ma incluse) ---
 def get_global_normalization(data):
     data = np.nan_to_num(data)
     h, w = data.shape
@@ -158,7 +150,10 @@ def save_8panel_card(mosaic_h, mosaic_o_aligned, mosaic_o_visual, mosaic_o_raw,
     plt.savefig(save_path, dpi=90)
     plt.close(fig)
 
+
 def create_dataset_filtered(base_dir):
+    base_dir = Path(base_dir) # Assicura che sia un Path object
+    
     aligned_dir = base_dir / '5_mosaics' / 'aligned_ready_for_crop'
     mosaics_dir = base_dir / '5_mosaics'
     output_dir = base_dir / '6_patches_final'
@@ -168,7 +163,7 @@ def create_dataset_filtered(base_dir):
     f_o_orig  = mosaics_dir / 'final_mosaic_observatory.fits'
 
     if not f_h_align.exists() or not f_o_align.exists() or not f_o_orig.exists():
-        print("❌ Mancano file necessari.")
+        print(f"❌ Mancano file necessari per {base_dir.name}.")
         return
 
     if output_dir.exists(): shutil.rmtree(output_dir)
@@ -254,8 +249,66 @@ def create_dataset_filtered(base_dir):
     print("\n✅ Finito.")
     print(f"   Patch Valide: {count}")
     print(f"   Patch Scartate (Bordi/Vuote): {skipped}")
+    
+    return True, base_dir
+
+def select_target_directory_manual():
+    print("\n" + "📂"*35)
+    print("SELEZIONE CARTELLA TARGET (Filtro 95%)".center(70))
+    print("📂"*35)
+    subdirs = [d for d in ROOT_DATA_DIR.iterdir() if d.is_dir() and d.name not in ['splits', 'logs', '__pycache__']]
+    if not subdirs: return None
+    for i, d in enumerate(subdirs):
+        print(f"   {i+1}: {d.name}")
+    try:
+        choice = int(input(f"\n👉 Seleziona (1-{len(subdirs)}): ").strip())
+        if 0 < choice <= len(subdirs): return subdirs[choice-1]
+    except: pass
+    return None
+
+def ask_continue_to_split(base_dir):
+    """Chiede se proseguire con lo Step 4 (Split)."""
+    next_script_name = 'Modello_2_pre_da_usopatch_dataset_step3.py' # Lo script di split che hai fornito
+    
+    print("\n" + "="*70)
+    print("🎯 TAGLIO PATCH COMPLETATO!")
+    print("="*70)
+    print(f"\n📋 Vuoi eseguire lo Step 4 (Split Train/Val/Test) ora?")
+    print(f"   Avvierà: **{next_script_name}**")
+    
+    while True:
+        print("\n" + "─"*70)
+        choice = input(f"👉 Continua con lo Split? [S/n, default=S]: ").strip().lower()
+        if choice in ('', 's', 'si', 'y', 'yes'):
+            return True
+        elif choice in ('n', 'no'):
+            return False
+        else:
+            print("❌ Scelta non valida.")
 
 if __name__ == "__main__":
-    target = select_target_directory()
+    
+    # 1. Trova il target: 
+    # Se chiamato da subprocess (con argomento), usa l'argomento.
+    # Altrimenti, mostra il menu manuale.
+    if len(sys.argv) > 1:
+        target = Path(sys.argv[1])
+    else:
+        target = select_target_directory_manual()
+    
     if target:
-        create_dataset_filtered(target)
+        success, base_dir = create_dataset_filtered(target)
+        
+        if success and ask_continue_to_split(base_dir):
+            try:
+                split_script_name = 'Modello_2_pre_da_usopatch_dataset_step3.py'
+                next_script = CURRENT_SCRIPT_DIR / split_script_name
+                
+                if next_script.exists():
+                    # Passa il percorso assoluto della cartella base per la portabilità
+                    print(f"\n🚀 Avvio Split per {base_dir.name}...")
+                    subprocess.run([sys.executable, str(next_script), str(base_dir)], check=True)
+                else:
+                    print(f"\n⚠️  Script {next_script.name} non trovato in {CURRENT_SCRIPT_DIR}")
+            except Exception as e:
+                print(f"❌ Errore avvio script di split: {e}")
