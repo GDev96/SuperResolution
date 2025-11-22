@@ -7,9 +7,13 @@ Features:
    95% di dati validi (elimina bordi neri e zone vuote).
 3. Genera la Context Card a 8 pannelli per verifica visiva.
 
+MODIFICA: I file PNG vengono salvati in una cartella separata 'coppie_patch_png'.
+
 INPUT: aligned_hubble.fits, aligned_observatory.fits, final_mosaic_observatory.fits
        (Attesi in [data_dir]/5_mosaics/aligned_ready_for_crop/)
-OUTPUT: 6_patches_final/pair_XXXXX/
+OUTPUT: 
+  - Dati: 6_patches_final/pair_XXXXX/ (FITS)
+  - Visual: coppie_patch_png/pair_XXXXX_context.png (PNG)
 ------------------------------------------------------------------------
 """
 
@@ -43,11 +47,11 @@ STRIDE = 64           # Passo di scorrimento (overlap)
 
 # SOGLIE DI QUALITÀ
 MIN_PIXEL_VALUE = 0.0001 # Soglia per considerare un pixel come "dato valido"
-MIN_COVERAGE = 0.95      # Filtro: copertura minima del 95%
-SAVE_MAP_EVERY_N =1     # Salva la Context Card ogni N patch
+MIN_COVERAGE = 0.99    # Filtro: copertura minima del 99%
+SAVE_MAP_EVERY_N = 1     # Salva la Context Card ogni N patch
 # ==========================================================
 
-# --- FUNZIONI DI NORMALIZZAZIONE E PLOT (Mantengo la tua logica originale) ---
+# --- FUNZIONI DI NORMALIZZAZIONE E PLOT ---
 
 def get_global_normalization(data: np.ndarray) -> tuple[float, float]:
     data = np.nan_to_num(data)
@@ -169,7 +173,12 @@ def create_dataset_filtered(base_dir: Path) -> tuple[bool, Path] | None:
     # 1. Definizione Path
     aligned_dir = base_dir / '5_mosaics' / 'aligned_ready_for_crop'
     mosaics_dir = base_dir / '5_mosaics'
+    
+    # Cartella per i dati FITS (per il training)
     output_dir = base_dir / '6_patches_final'
+    
+    # Cartella separata per le immagini PNG (Visualizzazione)
+    png_output_dir = base_dir / 'coppie_patch_png'
     
     f_h_align = aligned_dir / 'aligned_hubble.fits'
     f_o_align = aligned_dir / 'aligned_observatory.fits'
@@ -188,11 +197,15 @@ def create_dataset_filtered(base_dir: Path) -> tuple[bool, Path] | None:
         for f in missing_files:
             print(f"   -> Manca: {f} (Atteso in: {aligned_dir} o {mosaics_dir})")
         print("="*70 + "\n")
-        return None # Ritorna None per gestire l'errore nel chiamante
+        return None
 
-    # Pulisci e crea la cartella di output
+    # Pulisci e crea la cartella di output dati (FITS)
     if output_dir.exists(): shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Pulisci e crea la cartella di output PNG
+    if png_output_dir.exists(): shutil.rmtree(png_output_dir)
+    png_output_dir.mkdir(parents=True, exist_ok=True)
 
     # 3. Caricamento Dati e WCS
     print(f"\n⚙️  Caricamento Dati da {base_dir.name}...")
@@ -227,7 +240,7 @@ def create_dataset_filtered(base_dir: Path) -> tuple[bool, Path] | None:
     count = 0
     skipped = 0
     
-    # 5. Loop di Estrazione e Filtro (Logica intatta)
+    # 5. Loop di Estrazione e Filtro
     print(f"\n✂️  Estrazione con Filtro {MIN_COVERAGE*100:.0f}%...")
     with tqdm(total=total, desc="Processing", unit="patch") as pbar:
         for y in y_list:
@@ -249,7 +262,7 @@ def create_dataset_filtered(base_dir: Path) -> tuple[bool, Path] | None:
                 patch_o_in = resize(patch_o_dat, (LR_SIZE, LR_SIZE), 
                                   anti_aliasing=True, preserve_range=True).astype(np.float32)
 
-                # 6. Salvataggio Coppie
+                # 6. Salvataggio Coppie FITS (Cartella strutturata per training)
                 pair_dir = output_dir / f"pair_{count:05d}"
                 pair_dir.mkdir(exist_ok=True)
                 
@@ -259,15 +272,16 @@ def create_dataset_filtered(base_dir: Path) -> tuple[bool, Path] | None:
                 h_lr['NAXIS1'], h_lr['NAXIS2'] = LR_SIZE, LR_SIZE
                 fits.PrimaryHDU(data=patch_o_in, header=h_lr).writeto(pair_dir/"observatory.fits", overwrite=True)
                 
-                # 7. Salvataggio Context Card (ogni N iterazioni)
+                # 7. Salvataggio Context Card PNG (Cartella separata dedicata)
                 if count % SAVE_MAP_EVERY_N == 0:
+                    png_filename = f"pair_{count:05d}_context.png"
                     save_8panel_card(
                         mosaic_h=data_h, mosaic_o_aligned=data_o_aligned,
                         mosaic_o_visual=visual_rotated, mosaic_o_raw=data_o_raw,
                         patch_h=patch_h, patch_o_in=patch_o_in,
                         x=x, y=y, wcs_h=wcs_h, wcs_orig=wcs_orig,
                         vmin_h=vmin_h, vmax_h=vmax_h, vmin_o=vmin_o, vmax_o=vmax_o,
-                        save_path=pair_dir/"context_card.png"
+                        save_path=png_output_dir / png_filename
                     )
                 
                 count += 1
@@ -276,10 +290,11 @@ def create_dataset_filtered(base_dir: Path) -> tuple[bool, Path] | None:
     print("\n✅ Finito.")
     print(f"   Patch Valide: {count}")
     print(f"   Patch Scartate (Bordi/Vuote): {skipped}")
+    print(f"   PNG salvati in: {png_output_dir}")
     
     return True, base_dir
 
-# --- FUNZIONI DI INPUT E AVANZAMENTO (Mantengo la tua logica originale) ---
+# --- FUNZIONI DI INPUT E AVANZAMENTO ---
 
 def select_target_directory_manual():
     """Permette all'utente di selezionare la cartella target dei dati (Modalità Manuale)."""
