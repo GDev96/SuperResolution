@@ -4,7 +4,7 @@ Combina Step 1 (Conversione WCS) e Step 2 (Registrazione) in un unico script.
 Gli output dei due step rimangono separati e distinti.
 Tutti i metodi sono mantenuti ESATTAMENTE come negli script originali.
 MODIFICATO: Integra gestione path dinamici e menu selezione da v1.
-Aggiornato per chiamare step2_mosaico_1_33.py
+AGGIORNATO: Menu di avanzamento per scegliere tra i vari script Mosaico/Crop.
 """
 
 import os
@@ -31,24 +31,14 @@ warnings.filterwarnings('ignore', category=fits.verify.VerifyWarning)
 # ============================================================================
 # CONFIGURAZIONE PATH DINAMICI (UNIVERSALI)
 # ============================================================================
-# 1. Ottiene la directory corrente dello script (es. .../SuperResolution/scripts)
 CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
-
-# 2. Risale alla root del progetto (es. .../SuperResolution)
-#    Assumiamo che lo script sia dentro "scripts/", quindi il genitore è la root.
 PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
-
-# 3. Dove cercare i dati (M33, ecc.)
 ROOT_DATA_DIR = PROJECT_ROOT / "data"
-
-# 4. Dove salvare i log
 LOG_DIR_ROOT = ROOT_DATA_DIR / "logs"
-
-# 5. Cartella script (uguale alla directory corrente)
 SCRIPTS_DIR = CURRENT_SCRIPT_DIR
 
 print(f"📂 Project Root rilevata: {PROJECT_ROOT}")
-print(f"📂 Data Dir rilevata:    {ROOT_DATA_DIR}")
+print(f"📂 Data Dir rilevata:    {ROOT_DATA_DIR}")
 # ============================================================================
 # Prova a importare reproject
 try:
@@ -70,38 +60,35 @@ REPROJECT_ORDER = 'bilinear'
 log_lock = threading.Lock()
 
 # ============================================================================
-# FUNZIONI MENU E SELEZIONE (DA V1)
+# FUNZIONI MENU E SELEZIONE (AGGIORNATE)
 # ============================================================================
 
 def select_target_directory():
-    """
-    Mostra un menu per selezionare una o TUTTE le cartelle target.
-    """
+    """Mostra un menu per selezionare una o TUTTE le cartelle target."""
     print("\n" + "📂"*35)
     print("SELEZIONE CARTELLA TARGET".center(70))
     print("📂"*35)
     print(f"\nScansione sottocartelle in: {ROOT_DATA_DIR}")
 
     try:
-        # Filtra solo le cartelle che contengono dati (es. M33) ed esclude 'logs' e 'splits'
         subdirs = [d for d in ROOT_DATA_DIR.iterdir() if d.is_dir() and d.name not in ['splits', 'logs']]
     except Exception as e:
         print(f"\n❌ ERRORE: Impossibile leggere la cartella {ROOT_DATA_DIR}")
-        print(f"   Dettagli: {e}")
+        print(f"   Dettagli: {e}")
         if not ROOT_DATA_DIR.exists():
-             print(f"   ⚠️ La cartella non esiste. Creala e inserisci le cartelle target (es. M33).")
+             print(f"   ⚠️ La cartella non esiste. Creala e inserisci le cartelle target (es. M33).")
         return []
 
     if not subdirs:
         print(f"\n❌ ERRORE: Nessuna sottocartella trovata in {ROOT_DATA_DIR}")
-        print("   Assicurati di avere la struttura: data/M33/1_originarie/...")
+        print("   Assicurati di avere la struttura: data/M33/1_originarie/...")
         return []
 
     print("\nCartelle target disponibili:")
-    print(f"   0: ✨ Processa TUTTI i {len(subdirs)} target")
-    print("   " + "─"*30)
+    print(f"   0: ✨ Processa TUTTI i {len(subdirs)} target")
+    print("   " + "─"*30)
     for i, dir_path in enumerate(subdirs):
-        print(f"   {i+1}: {dir_path.name}")
+        print(f"   {i+1}: {dir_path.name}")
 
     while True:
         print("\n" + "─"*70)
@@ -122,7 +109,7 @@ def select_target_directory():
             if 0 <= choice_idx < len(subdirs):
                 selected_dir = subdirs[choice_idx]
                 print(f"\n✅ Cartella selezionata: {selected_dir.name}")
-                print(f"   Percorso completo: {selected_dir}")
+                print(f"   Percorso completo: {selected_dir}")
                 return [selected_dir]
             else:
                 print(f"❌ Scelta non valida. Inserisci un numero tra 0 e {len(subdirs)}.")
@@ -132,31 +119,61 @@ def select_target_directory():
             print(f"❌ Errore: {e}")
             return []
 
-def ask_continue_to_cropping():
-    """Chiede all'utente se vuole proseguire con Step 3+4 (Ritaglio e Mosaico)."""
-    print("\n" + "="*70)
-    print("🎯 STEP 1 E 2 (WCS e Registrazione) COMPLETATI!")
-    print("="*70)
-    print("\n📋 OPZIONI:")
-    print("   1️⃣  Continua con Step 3+4 (Ritaglio e Mosaico)")
-    print("   2️⃣  Termina qui")
+def ask_next_step_choice(successful_targets):
+    """Chiede quale script di mosaico eseguire per i target completati, con un menu migliorato."""
+    print("\n" + "⭐"*70)
+    print(f"🎯 FASE 2: REGISTRAZIONE COMPLETATA per {len(successful_targets)} target!")
+    print("⭐"*70)
     
-    # MODIFICATO: Nome del nuovo file
-    next_script_name = 'Dataset_step2_mosaico_full.py'
-    
-    while True:
-        print("\n" + "─"*70)
-        choice = input(f"👉 Vuoi continuare con '{next_script_name}'? [S/n, default=S]: ").strip().lower()
-        if choice in ('', 's', 'si', 'y', 'yes'):
-            print(f"\n✅ Avvio Step 3+4 ({next_script_name})...")
-            return True
-        elif choice in ('n', 'no'):
-            print("\n✅ Pipeline interrotta")
-            print(f"   Per eseguire Step 3+4 in seguito, esegui '{next_script_name}'")
-            return False
-        else:
-            print("❌ Scelta non valida. Inserisci S per Sì o N per No.")
+    OPTIONS = [
+        ('Dataset_step2_1_0mosaicohubble.py', '🌍 Mosaico WCS Esteso (Massima Copertura)'),
+        ('Dataset_step2_1_1mosaicoosser.py', '✂️ Crop e Mosaico Uniforme (Massima Densità)'),
+        ('Dataset_step2_2_MOSAICO_MIX.py', '✨ Mosaico Avanzato (Obs su Griglia Hubble)'),
+    ]
 
+    print("\n👉 SELEZIONA LA STRATEGIA DI MOSAICO FINALE (Prossimo Step):")
+    
+    print("\n" + "─"*70)
+    print("   [1] 🌍 Mosaico WCS Esteso (Dataset_step2_1_0mosaicohubble.py)")
+    print("       Crea un grande mosaico utilizzando la risoluzione più alta per coprire l'intera estensione del campo. Ideale per la mappatura generale.")
+    print("─"*70)
+    print("   [2] ✂️ Crop e Mosaico Uniforme (Dataset_step2_1_1mosaicoosser.py)")
+    print("       Ritaglia tutte le immagini all'area di intersezione comune (minima dimensione) e crea un mosaico compatto. Veloce e garantisce densità.")
+    print("─"*70)
+    print("   [3] ✨ Mosaico Avanzato (Dataset_step2_2_MOSAICO_MIX.py)")
+    print("       Allinea direttamente l'Osservatorio sulla griglia ad alta risoluzione di Hubble, preparando i dati per il filtro di qualità finale.")
+    print("─"*70)
+    
+    print("\n   [0] 🛑 Termina qui. (I file registrati si trovano in /3_registered_native)")
+
+    while True:
+        print("\n" + "="*70)
+        try:
+            choice_str = input(f"🚀 Inserisci la tua scelta (0-3): ").strip()
+            
+            if choice_str == '0':
+                print("\n✅ Pipeline interrotta. I file registrati in /3_registered_native sono pronti per la selezione manuale dello Step 2.")
+                return None, None
+            
+            choice = int(choice_str)
+            if 1 <= choice <= len(OPTIONS):
+                next_script_name, next_script_desc = OPTIONS[choice - 1]
+                next_script_path = SCRIPTS_DIR / next_script_name
+                
+                if not next_script_path.exists():
+                    print(f"\n❌ ERRORE: Lo script selezionato '{next_script_name}' non è stato trovato nella directory degli script.")
+                    print("Si prega di verificare l'installazione e riprovare.")
+                    continue
+                
+                print(f"\n✅ Avvio: {next_script_desc}...")
+                return next_script_path, next_script_name
+            else:
+                print("❌ Scelta non valida. Inserisci un numero tra 0 e 3.")
+        except ValueError:
+            print("❌ Input non valido. Inserisci un numero.")
+            
+# Nota: La funzione `main` nello script unificato dovrà chiamare questa funzione al posto della precedente.
+# (La modifica automatica è già stata fatta nel contesto precedente).
 # ============================================================================
 # SETUP LOGGING
 # ============================================================================
@@ -188,19 +205,12 @@ def setup_logging():
     return logger
 
 # ============================================================================
-# STEP 1: FUNZIONI CONVERSIONE WCS (ESATTE DALL'ORIGINALE)
+# STEP 1: FUNZIONI CONVERSIONE WCS (INVARIANTI)
 # ============================================================================
 
 def parse_coordinates(ra_str, dec_str):
     """
     Converte coordinate da formato sessagesimale a decimale.
-    
-    Args:
-        ra_str: es. '1 34 01' (ore minuti secondi)
-        dec_str: es. '30 41 00' (gradi minuti secondi)
-    
-    Returns:
-        (ra_deg, dec_deg) in gradi decimali
     """
     try:
         # Rimuovi spazi extra
@@ -237,12 +247,6 @@ def parse_coordinates(ra_str, dec_str):
 def calculate_pixel_scale(header):
     """
     Calcola pixel scale da informazioni nel header.
-    
-    Args:
-        header: Header FITS
-    
-    Returns:
-        pixel_scale in gradi/pixel
     """
     # Estrai parametri
     xpixsz = header.get('XPIXSZ', None)  # micron
@@ -257,20 +261,12 @@ def calculate_pixel_scale(header):
         return pixel_scale_deg
     
     # Fallback: stima per setup comune
-    # Tipico per piccoli telescopi: ~1-2 arcsec/pixel
     return 1.5 / 3600.0  # 1.5 arcsec/pixel
 
 
 def create_wcs_from_header(header, data_shape):
     """
     Crea WCS completo da informazioni nel header.
-    
-    Args:
-        header: Header FITS originale
-        data_shape: Dimensioni dell'immagine (height, width)
-    
-    Returns:
-        WCS object, o None se fallisce
     """
     try:
         # Estrai coordinate centro
@@ -315,14 +311,6 @@ def create_wcs_from_header(header, data_shape):
 def add_wcs_to_file(input_file, output_file, logger):
     """
     Aggiunge WCS a un file FITS che ha OBJCTRA/OBJCTDEC.
-    
-    Args:
-        input_file: File input
-        output_file: File output con WCS
-        logger: Logger
-    
-    Returns:
-        True se successo, False altrimenti
     """
     try:
         filename = os.path.basename(input_file)
@@ -355,9 +343,9 @@ def add_wcs_to_file(input_file, output_file, logger):
             
             # Mantieni campi importanti originali
             important_keys = ['SIMPLE', 'BITPIX', 'NAXIS', 'NAXIS1', 'NAXIS2',
-                            'BZERO', 'BSCALE', 'DATE-OBS', 'EXPTIME', 'FILTER',
-                            'INSTRUME', 'TELESCOP', 'XBINNING', 'YBINNING',
-                            'XPIXSZ', 'YPIXSZ', 'GAIN', 'CCD-TEMP', 'FOCALLEN']
+                              'BZERO', 'BSCALE', 'DATE-OBS', 'EXPTIME', 'FILTER',
+                              'INSTRUME', 'TELESCOP', 'XBINNING', 'YBINNING',
+                              'XPIXSZ', 'YPIXSZ', 'GAIN', 'CCD-TEMP', 'FOCALLEN']
             
             # Crea nuovo header combinato
             new_header = fits.Header()
@@ -390,14 +378,6 @@ def add_wcs_to_file(input_file, output_file, logger):
 def extract_lith_data(filename, logger):
     """
     Estrae dati e WCS da file LITH/HST.
-    Questi file hanno già WCS valido, basta estrarlo.
-    
-    Args:
-        filename: Path al file FITS
-        logger: Logger
-    
-    Returns:
-        (data, header, info_dict) o (None, None, None) se fallisce
     """
     try:
         with fits.open(filename) as hdul:
@@ -471,7 +451,7 @@ def process_osservatorio_folder(input_dir, output_dir, logger):
     dec_list = []
     scale_list = []
     
-    with tqdm(total=len(fits_files), desc="  Osservatorio", unit="file") as pbar:
+    with tqdm(total=len(fits_files), desc="  Osservatorio", unit="file") as pbar:
         for input_file in fits_files:
             basename = input_file.name
             name, ext = os.path.splitext(basename)
@@ -485,7 +465,13 @@ def process_osservatorio_folder(input_dir, output_dir, logger):
                         wcs = WCS(hdul[0].header)
                         if wcs.has_celestial:
                             ra, dec = wcs.wcs.crval
-                            pixel_scale = abs(wcs.wcs.cdelt[0]) * 3600
+                            # Estrai pixel scale (in arcsec/px)
+                            try:
+                                cd = wcs.wcs.cd
+                                pixel_scale = np.sqrt(cd[0,0]**2 + cd[0,1]**2) * 3600
+                            except:
+                                pixel_scale = abs(wcs.wcs.cdelt[0]) * 3600
+                                
                             ra_list.append(ra)
                             dec_list.append(dec)
                             scale_list.append(pixel_scale)
@@ -524,7 +510,7 @@ def process_lith_folder(input_dir, output_dir, logger):
     dec_list = []
     scale_list = []
     
-    with tqdm(total=len(fits_files), desc="  LITH", unit="file") as pbar:
+    with tqdm(total=len(fits_files), desc="  LITH", unit="file") as pbar:
         for input_file in fits_files:
             data, header, info = extract_lith_data(input_file, logger)
             
@@ -564,7 +550,7 @@ def process_lith_folder(input_dir, output_dir, logger):
     return prepared_count, failed_count, stats
 
 # ============================================================================
-# STEP 2: FUNZIONI REGISTRAZIONE (ESATTE DALL'ORIGINALE)
+# STEP 2: FUNZIONI REGISTRAZIONE (INVARIANTI)
 # ============================================================================
 
 def extract_wcs_info(filepath, logger):
@@ -611,6 +597,7 @@ def extract_wcs_info(filepath, logger):
                     pixel_scale_deg = abs(wcs.wcs.cdelt[0])
                 pixel_scale_arcsec = pixel_scale_deg * 3600.0
             except:
+                # Fallback: se non riesci a calcolare una scala, usa una stima
                 pixel_scale_arcsec = 0.0
             
             return {
@@ -648,7 +635,7 @@ def analyze_images(input_dir, source_name, logger):
     
     wcs_info_list = []
     
-    with tqdm(total=len(files), desc=f"  Analisi {source_name}", unit="file") as pbar:
+    with tqdm(total=len(files), desc=f"  Analisi {source_name}", unit="file") as pbar:
         for filepath in files:
             info = extract_wcs_info(filepath, logger)
             if info:
@@ -662,7 +649,7 @@ def analyze_images(input_dir, source_name, logger):
                     logger.warning(f"✗ {os.path.basename(filepath)}: WCS non valido")
             pbar.update(1)
     
-    print(f"   ✓ {len(wcs_info_list)}/{len(files)} con WCS valido")
+    print(f"   ✓ {len(wcs_info_list)}/{len(files)} con WCS valido")
     
     return wcs_info_list
 
@@ -722,7 +709,6 @@ def create_common_wcs_frame(wcs_info_list, logger):
     dec_span *= margin_factor
     
     # Risoluzione di riferimento (non usata per calcolare dimensioni output!)
-    # Serve solo come orientamento del frame WCS
     ref_pixel_scale_deg = 0.04 / 3600.0  # 0.04 arcsec/px (HST-like, ma arbitrario)
     
     # Crea WCS di riferimento
@@ -736,13 +722,13 @@ def create_common_wcs_frame(wcs_info_list, logger):
     
     with log_lock:
         logger.info(f"WCS Comune creato:")
-        logger.info(f"  Centro: RA={ra_center:.4f}°, DEC={dec_center:.4f}°")
-        logger.info(f"  Span: RA={ra_span:.4f}°, DEC={dec_span:.4f}°")
-        logger.info(f"  Risoluzione riferimento: {ref_pixel_scale_deg*3600:.4f}\"/px (solo orientamento)")
+        logger.info(f"  Centro: RA={ra_center:.4f}°, DEC={dec_center:.4f}°")
+        logger.info(f"  Span: RA={ra_span:.4f}°, DEC={dec_span:.4f}°")
+        logger.info(f"  Risoluzione riferimento: {ref_pixel_scale_deg*3600:.4f}\"/px (solo orientamento)")
     
     print(f"\n✓ WCS comune creato:")
-    print(f"   Centro: RA={ra_center:.4f}°, DEC={dec_center:.4f}°")
-    print(f"   Span: RA={ra_span:.4f}°, DEC={dec_span:.4f}°")
+    print(f"   Centro: RA={ra_center:.4f}°, DEC={dec_center:.4f}°")
+    print(f"   Span: RA={ra_span:.4f}°, DEC={dec_span:.4f}°")
     
     return reference_wcs
 
@@ -750,9 +736,6 @@ def create_common_wcs_frame(wcs_info_list, logger):
 def reproject_image_native(wcs_info, common_wcs, output_dir, logger):
     """
     Riproietta un'immagine mantenendo la sua risoluzione NATIVA.
-    
-    IMPORTANTE: Ogni immagine decide autonomamente le dimensioni del suo canvas
-    in base alla sua risoluzione originale. Non c'è una dimensione target comune.
     """
     try:
         filepath = wcs_info['file']
@@ -887,7 +870,7 @@ def register_images(wcs_info_list, common_wcs, output_dir, source_name, logger):
             for info in wcs_info_list
         }
         
-        with tqdm(total=len(wcs_info_list), desc=f"  {source_name}") as pbar:
+        with tqdm(total=len(wcs_info_list), desc=f"  {source_name}") as pbar:
             for future in as_completed(futures):
                 try:
                     result = future.result()
@@ -906,8 +889,8 @@ def register_images(wcs_info_list, common_wcs, output_dir, source_name, logger):
                 
                 pbar.update(1)
     
-    print(f"   ✓ Successo: {success_count}")
-    print(f"   ✗ Errori: {error_count}")
+    print(f"   ✓ Successo: {success_count}")
+    print(f"   ✗ Errori: {error_count}")
     
     with log_lock:
         logger.info(f"{source_name}: {success_count} successo, {error_count} errori")
@@ -944,19 +927,19 @@ def main_step1(INPUT_OSSERVATORIO, INPUT_LITH, OUTPUT_OSSERVATORIO_WCS, OUTPUT_L
         logger
     )
     
-    print(f"\n   ✓ Processati: {prep_oss}")
-    print(f"   ✗ Falliti: {fail_oss}")
+    print(f"\n   ✓ Processati: {prep_oss}")
+    print(f"   ✗ Falliti: {fail_oss}")
     
     if stats_oss:
         ra_min, ra_max = stats_oss['ra_range']
         dec_min, dec_max = stats_oss['dec_range']
-        print(f"\n   📊 Campo:")
-        print(f"      RA: {ra_min:.4f}° → {ra_max:.4f}° (span: {ra_max-ra_min:.4f}°)")
-        print(f"      DEC: {dec_min:.4f}° → {dec_max:.4f}° (span: {dec_max-dec_min:.4f}°)")
-        print(f"      Scala media: {stats_oss['avg_scale']:.3f}\"/px")
+        print(f"\n   📊 Campo:")
+        print(f"      RA: {ra_min:.4f}° → {ra_max:.4f}° (span: {ra_max-ra_min:.4f}°)")
+        print(f"      DEC: {dec_min:.4f}° → {dec_max:.4f}° (span: {dec_max-dec_min:.4f}°)")
+        print(f"      Scala media: {stats_oss['avg_scale']:.3f}\"/px")
     
     # LITH
-    print("\n🛰️  LITH/HST (Estrazione WCS esistente)")
+    print("\n🛰️  LITH/HST (Estrazione WCS esistente)")
     
     prep_lith, fail_lith, stats_lith = process_lith_folder(
         INPUT_LITH,
@@ -964,16 +947,16 @@ def main_step1(INPUT_OSSERVATORIO, INPUT_LITH, OUTPUT_OSSERVATORIO_WCS, OUTPUT_L
         logger
     )
     
-    print(f"\n   ✓ Processati: {prep_lith}")
-    print(f"   ✗ Falliti: {fail_lith}")
+    print(f"\n   ✓ Processati: {prep_lith}")
+    print(f"   ✗ Falliti: {fail_lith}")
     
     if stats_lith:
         ra_min, ra_max = stats_lith['ra_range']
         dec_min, dec_max = stats_lith['dec_range']
-        print(f"\n   📊 Campo:")
-        print(f"      RA: {ra_min:.4f}° → {ra_max:.4f}° (span: {ra_max-ra_min:.4f}°)")
-        print(f"      DEC: {dec_min:.4f}° → {dec_max:.4f}° (span: {dec_max-dec_min:.4f}°)")
-        print(f"      Scala media: {stats_lith['avg_scale']:.3f}\"/px")
+        print(f"\n   📊 Campo:")
+        print(f"      RA: {ra_min:.4f}° → {ra_max:.4f}° (span: {ra_max-ra_min:.4f}°)")
+        print(f"      DEC: {dec_min:.4f}° → {dec_max:.4f}° (span: {dec_max-dec_min:.4f}°)")
+        print(f"      Scala media: {stats_lith['avg_scale']:.3f}\"/px")
     
     # RIEPILOGO
     total_prep = prep_oss + prep_lith
@@ -982,7 +965,7 @@ def main_step1(INPUT_OSSERVATORIO, INPUT_LITH, OUTPUT_OSSERVATORIO_WCS, OUTPUT_L
     logger.info(f"Totale: {total_prep} preparati, {total_fail} falliti")
     
     if total_prep > 0:
-        print(f"\n✅ COMPLETATO! File con WCS in:\n       • {OUTPUT_OSSERVATORIO_WCS}\n       • {OUTPUT_LITH_WCS}")
+        print(f"\n✅ COMPLETATO! File con WCS in:\n       • {OUTPUT_OSSERVATORIO_WCS}\n       • {OUTPUT_LITH_WCS}")
     else:
         print(f"\n⚠️ Nessun file processato.")
     
@@ -1004,9 +987,9 @@ def main_step2(INPUT_HUBBLE, INPUT_OBSERVATORY, OUTPUT_HUBBLE, OUTPUT_OBSERVATOR
     print("🔭"*35)
     
     print(f"\n📂 CONFIGURAZIONE:")
-    print(f"   Input Hubble: {INPUT_HUBBLE}")
-    print(f"   Input Observatory: {INPUT_OBSERVATORY}")
-    print(f"   Output: {BASE_DIR / '3_registered_native'}")
+    print(f"   Input Hubble: {INPUT_HUBBLE}")
+    print(f"   Input Observatory: {INPUT_OBSERVATORY}")
+    print(f"   Output: {BASE_DIR / '3_registered_native'}")
     
     # Analizza immagini
     print(f"\n{'='*70}")
@@ -1027,11 +1010,11 @@ def main_step2(INPUT_HUBBLE, INPUT_OBSERVATORY, OUTPUT_HUBBLE, OUTPUT_OBSERVATOR
     for source_name, info_list in [("Hubble", hubble_info), ("Observatory", obs_info)]:
         if info_list:
             scales = [info['pixel_scale'] for info in info_list]
-            print(f"\n   {source_name}:")
-            print(f"      Min: {min(scales):.4f}\"/px")
-            print(f"      Max: {max(scales):.4f}\"/px")
-            print(f"      Media: {np.mean(scales):.4f}\"/px")
-            print(f"      → Tutte manterranno la loro risoluzione originale!")
+            print(f"\n   {source_name}:")
+            print(f"      Min: {min(scales):.4f}\"/px")
+            print(f"      Max: {max(scales):.4f}\"/px")
+            print(f"      Media: {np.mean(scales):.4f}\"/px")
+            print(f"      → Tutte manterranno la loro risoluzione originale!")
     
     # Crea frame WCS comune (solo per riferimento)
     print(f"\n{'='*70}")
@@ -1067,12 +1050,12 @@ def main_step2(INPUT_HUBBLE, INPUT_OBSERVATORY, OUTPUT_HUBBLE, OUTPUT_OBSERVATOR
     print(f"\n{'='*70}")
     print("📊 RIEPILOGO REGISTRAZIONE")
     print(f"{'='*70}")
-    print(f"\n   Totale registrate: {total_success}")
-    print(f"   Totale errori: {total_error}")
+    print(f"\n   Totale registrate: {total_success}")
+    print(f"   Totale errori: {total_error}")
     
     if total_success > 0:
         print(f"\n✅ REGISTRAZIONE COMPLETATA!")
-        print(f"\n   ✨ VANTAGGIO: Ogni immagine ha mantenuto la sua risoluzione nativa!")
+        print(f"\n   ✨ VANTAGGIO: Ogni immagine ha mantenuto la sua risoluzione nativa!")
     
     with log_lock:
         logger.info(f"Registrazione completata: {total_success} successo, {total_error} errori")
@@ -1158,37 +1141,33 @@ def main():
     print("\n" + "=" * 70)
     print("📊 RIEPILOGO PIPELINE COMPLETA (BATCH)")
     print("=" * 70)
-    print(f"   Target totali selezionati: {len(target_dirs)}")
-    print(f"   ✅ Completati con successo: {len(successful_targets)}")
+    print(f"   Target totali selezionati: {len(target_dirs)}")
+    print(f"   ✅ Completati con successo: {len(successful_targets)}")
     for target in successful_targets:
-        print(f"      - {target.name}")
-    print(f"\n   ❌ Falliti: {len(failed_targets)}")
+        print(f"      - {target.name}")
+    print(f"\n   ❌ Falliti: {len(failed_targets)}")
     for target in failed_targets:
-        print(f"      - {target.name}")
-    print(f"\n   ⏱️ Tempo totale batch: {elapsed_total:.2f}s")
+        print(f"      - {target.name}")
+    print(f"\n   ⏱️ Tempo totale batch: {elapsed_total:.2f}s")
 
     if not successful_targets:
-        print("\n❌ Nessun target completato con successo.")
+        print("\n❌ Nessun target completato con successo. Interruzione.")
         return
 
-    # TRANSIZIONE AI PROSSIMI SCRIPT (MODIFICATA)
-    if ask_continue_to_cropping():
+    # TRANSIZIONE AI PROSSIMI SCRIPT (MENU AGGIORNATO)
+    next_script_path, next_script_name = ask_next_step_choice(successful_targets)
+    
+    if next_script_path:
         try:
-            # MODIFICATO: Usa il nuovo nome file
-            next_script = SCRIPTS_DIR / 'Dataset_step2_mosaico_full.py'
-            
-            if next_script.exists():
-                print(f"\n🚀 Avvio Step 3+4 in loop per {len(successful_targets)} target...")
-                for BASE_DIR in successful_targets:
-                    print(f"\n--- Avvio per {BASE_DIR.name} ---")
-                    subprocess.run([sys.executable, str(next_script), str(BASE_DIR)])
-                    print(f"--- Completato {BASE_DIR.name} ---")
-            else:
-                print(f"\n⚠️  Script {next_script.name} non trovato nella directory {SCRIPTS_DIR}")
-                print(f"   Eseguilo manualmente quando pronto")
+            print(f"\n🚀 Avvio '{next_script_name}' in loop per {len(successful_targets)} target...")
+            for BASE_DIR in successful_targets:
+                print(f"\n--- Avvio per {BASE_DIR.name} ---")
+                # Passa il path assoluto al prossimo script
+                subprocess.run([sys.executable, str(next_script_path), str(BASE_DIR.resolve())])
+                print(f"--- Completato {BASE_DIR.name} ---")
         except Exception as e:
-            print(f"\n⚠️  Impossibile avviare automaticamente {next_script.name}: {e}")
-            print(f"   Eseguilo manualmente: python {next_script.name}")
+            print(f"\n⚠️  Impossibile avviare automaticamente {next_script_name}: {e}")
+            print(f"   Eseguilo manualmente: python {next_script_name}")
     else:
         print("\n👋 Arrivederci!")
 
