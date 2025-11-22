@@ -1,15 +1,15 @@
 """
 STEP 3 (FINAL): TAGLIO COPPIE + FILTRO QUALITÀ + VISUALIZZAZIONE GRAYSCALE OTTIMIZZATA
 ------------------------------------------------------------------------
-MIGLIORAMENTO VISIVO:
-1. Normalizzazione con STRETCH (Radice Quadrata): Rende visibili i grigi e le nebulosità 
-   invece di mostrare solo bianco/nero netto.
-2. Visualizzazione: Scala di Grigi ricca di dettagli + Puntini Gialli su stelle allineate.
-3. Organizzazione: PNG in cartella separata, FITS in cartella dataset.
+MIGLIORAMENTO:
+1. CERCHI SU FOTO 7: Nel pannello Overlay, le stelle allineate vengono ora 
+   evidenziate con cerchi gialli vuoti per verificarne la posizione.
+2. Soglie permissive (0.4) per rilevare più stelle.
+3. Normalizzazione Stretch per massima visibilità dei grigi.
 
 INPUT: 
-  - aligned_hubble.fits, aligned_observatory.fits (Dati geometricamente corretti)
-  - final_mosaic_hubble.fits, final_mosaic_observatory.fits (Dati Raw per visualizzazione)
+  - aligned_hubble.fits, aligned_observatory.fits
+  - final_mosaic_hubble.fits, final_mosaic_observatory.fits
   
 OUTPUT: 
   - Dati Training: 6_patches_final/pair_XXXXX/ (FITS)
@@ -36,6 +36,10 @@ from scipy.ndimage import maximum_filter
 
 warnings.filterwarnings('ignore')
 
+
+MIN_COVERAGE = 0.97      # Scarta se meno del 95% di dati validi
+
+
 # ================= CONFIGURAZIONE GLOBALE =================
 CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
@@ -48,22 +52,19 @@ STRIDE = 64           # Passo di scorrimento
 
 # SOGLIE DI QUALITÀ
 MIN_PIXEL_VALUE = 0.0001 
-MIN_COVERAGE = 0.95      # Scarta se meno del 95% di dati validi
 SAVE_MAP_EVERY_N = 1     # Frequenza salvataggio PNG
 
 # PARAMETRI VISUALIZZAZIONE STELLE
-PEAK_THRESHOLD = 0.8      # Soglia rilevamento picchi
-ALIGNMENT_THRESHOLD = 0.8 # Soglia sovrapposizione per considerare "allineato"
+PEAK_THRESHOLD = 0.4      # Soglia bassa per trovare più stelle
+ALIGNMENT_THRESHOLD = 0.4 # Soglia bassa per l'allineamento
 MARKER_COLOR = 'yellow'   
-MARKER_SIZE = 20
+MARKER_SIZE = 50          # Aumentato per fare cerchi ben visibili
 # ==========================================================
 
 # --- FUNZIONI DI NORMALIZZAZIONE E UTILITY ---
 
 def get_robust_normalization(data: np.ndarray) -> tuple[float, float]:
-    """
-    Calcola vmin/vmax ignorando i bordi neri e usando percentili.
-    """
+    """Calcola vmin/vmax ignorando i bordi neri."""
     data = np.nan_to_num(data)
     valid_mask = data > MIN_PIXEL_VALUE
     
@@ -71,8 +72,6 @@ def get_robust_normalization(data: np.ndarray) -> tuple[float, float]:
         return 0.0, 1.0
         
     valid_pixels = data[valid_mask]
-    
-    # Percentile 99.5% per tagliare le stelle saturate
     interval = PercentileInterval(99.5)
     vmin, vmax = interval.get_limits(valid_pixels)
     
@@ -82,39 +81,26 @@ def get_robust_normalization(data: np.ndarray) -> tuple[float, float]:
     return vmin, vmax
 
 def normalize_with_stretch(data: np.ndarray, vmin: float, vmax: float) -> np.ndarray:
-    """
-    Normalizza e applica uno STRETCH (Radice Quadrata) per mostrare i grigi.
-    """
+    """Normalizza e applica uno STRETCH (Radice Quadrata)."""
     data = np.nan_to_num(data)
     if vmax <= vmin: return np.zeros_like(data)
-    
-    # 1. Clipping Lineare
     clipped = np.clip((data - vmin) / (vmax - vmin), 0, 1)
-    
-    # 2. Stretch Non-Lineare (Gamma Correction / Sqrt)
-    # Questo espande i toni scuri trasformandoli in grigi visibili
-    stretched = np.sqrt(clipped) 
-    
-    return stretched
+    return np.sqrt(clipped) 
 
 def normalize_local_stretch(data: np.ndarray) -> np.ndarray:
-    """Normalizza la singola patch con stretch per massima visibilità."""
+    """Normalizza la singola patch con stretch."""
     try:
         data = np.nan_to_num(data)
-        # Usa percentili locali
         interval = PercentileInterval(99.5)
         vmin, vmax = interval.get_limits(data)
-        
         if vmax <= vmin: return np.zeros_like(data)
-        
         clipped = np.clip((data - vmin) / (vmax - vmin), 0, 1)
-        # Applica lo stesso stretch (Radice Quadrata)
         return np.sqrt(clipped)
     except:
         return np.zeros_like(data)
 
 def find_aligned_stars(patch_h: np.ndarray, patch_o_in: np.ndarray) -> tuple:
-    """Trova le coordinate delle stelle che coincidono in entrambe le immagini."""
+    """Trova le coordinate delle stelle che coincidono."""
     tar_n = normalize_local_stretch(patch_h)
     inp_s = resize(normalize_local_stretch(patch_o_in), (HR_SIZE, HR_SIZE), order=0)
     
@@ -122,8 +108,8 @@ def find_aligned_stars(patch_h: np.ndarray, patch_o_in: np.ndarray) -> tuple:
     
     footprint = np.ones((3, 3))
     local_max = maximum_filter(tar_n, footprint=footprint)
-    is_peak = (tar_n == local_max) & (tar_n > PEAK_THRESHOLD * tar_n.max())
     
+    is_peak = (tar_n == local_max) & (tar_n > PEAK_THRESHOLD * tar_n.max())
     aligned_mask = is_peak & (overlap_intensity > ALIGNMENT_THRESHOLD)
     
     y, x = np.where(aligned_mask)
@@ -142,9 +128,7 @@ def save_8panel_card(mosaic_h, mosaic_o_aligned, mosaic_h_raw, mosaic_o_raw,
     gs = fig.add_gridspec(2, 4)
     sc = 8 
 
-    # Helper per visualizzare con stretch
     def plot_mosaic(ax, data, title, color, box_col, v_min, v_max, wcs_curr=None, wcs_target=None):
-        # Usa normalize_with_stretch invece di quella lineare
         ax.imshow(normalize_with_stretch(data[::sc, ::sc], v_min, v_max), origin='lower', cmap='gray')
         ax.set_title(title, color=color, fontsize=12)
         ax.axis('off')
@@ -160,41 +144,47 @@ def save_8panel_card(mosaic_h, mosaic_o_aligned, mosaic_h_raw, mosaic_o_raw,
             except:
                 pass
 
-    # --- RIGA 1: Mosaici (con Stretch) ---
+    # --- RIGA 1: Mosaici ---
     plot_mosaic(fig.add_subplot(gs[0, 0]), mosaic_h, "1. Hubble Master (HR)", 'green', 'lime', vmin_h, vmax_h, wcs_h, wcs_h)
     plot_mosaic(fig.add_subplot(gs[0, 1]), mosaic_o_aligned, "2. Obs Aligned (LR)", 'magenta', 'cyan', vmin_o, vmax_o, wcs_h, wcs_h)
     plot_mosaic(fig.add_subplot(gs[0, 2]), mosaic_h_raw, "3. Hubble Native (Raw)", 'orange', 'orange', vmin_h, vmax_h, wcs_orig_h, wcs_h)
     plot_mosaic(fig.add_subplot(gs[0, 3]), mosaic_o_raw, "4. Obs Native (Raw)", 'white', 'red', vmin_o, vmax_o, wcs_orig_o, wcs_h)
 
-    # --- RIGA 2: Patch e Dettagli (con Stretch) ---
+    # --- RIGA 2: Patch e Dettagli ---
     
     x_stars, y_stars = find_aligned_stars(patch_h, patch_o_in)
     x_stars_lr = x_stars * (LR_SIZE / HR_SIZE)
     y_stars_lr = y_stars * (LR_SIZE / HR_SIZE)
 
-    # 5. Patch Hubble
+    # 5. Patch Hubble - Cerchi Vuoti
     ax5 = fig.add_subplot(gs[1, 0])
     ax5.imshow(normalize_local_stretch(patch_h), origin='lower', cmap='gray')
-    ax5.scatter(x_stars, y_stars, s=MARKER_SIZE, c=MARKER_COLOR, marker='.', alpha=0.7)
+    # facecolors='none' crea il cerchio vuoto
+    ax5.scatter(x_stars, y_stars, s=MARKER_SIZE, facecolors='none', edgecolors=MARKER_COLOR, marker='o', linewidths=1.5, alpha=0.9)
     ax5.set_title("5. Hubble Target (HR)", color='black')
     ax5.axis('off')
 
-    # 6. Patch Obs
+    # 6. Patch Obs - Cerchi Vuoti
     ax6 = fig.add_subplot(gs[1, 1])
     ax6.imshow(normalize_local_stretch(patch_o_in), origin='lower', cmap='gray')
-    ax6.scatter(x_stars_lr, y_stars_lr, s=MARKER_SIZE, c=MARKER_COLOR, marker='.', alpha=0.7)
+    ax6.scatter(x_stars_lr, y_stars_lr, s=MARKER_SIZE, facecolors='none', edgecolors=MARKER_COLOR, marker='o', linewidths=1.5, alpha=0.9)
     ax6.set_title("6. Obs Input (LR)", color='black')
     ax6.axis('off')
 
-    # 7. Check Overlay
+    # 7. Check Overlay - ORA CON CERCHI SULLE STELLE ALLINEATE
     ax7 = fig.add_subplot(gs[1, 2])
     inp_s = resize(normalize_local_stretch(patch_o_in), (HR_SIZE, HR_SIZE), order=0)
     tar_n = normalize_local_stretch(patch_h)
     rgb = np.zeros((HR_SIZE, HR_SIZE, 3))
     rgb[..., 0] = inp_s * 0.9 # Rosso
     rgb[..., 1] = tar_n * 0.9 # Verde
+    
     ax7.imshow(rgb, origin='lower')
-    ax7.set_title("7. Overlay (R=Inp, G=Tar)")
+    
+    # AGGIUNTA: Cerchia le stelle anche qui
+    ax7.scatter(x_stars, y_stars, s=MARKER_SIZE, facecolors='none', edgecolors=MARKER_COLOR, marker='o', linewidths=1.5, alpha=0.9)
+    
+    ax7.set_title("7. Overlay (Cerchi = Stelle Allineate)", color='black')
     ax7.axis('off')
 
     # 8. Info
@@ -219,14 +209,11 @@ def save_8panel_card(mosaic_h, mosaic_o_aligned, mosaic_h_raw, mosaic_o_raw,
 def create_dataset_filtered(base_dir: Path) -> tuple[bool, Path] | None:
     """Pipeline principale di estrazione."""
     
-    # 1. Definizione Cartelle
     aligned_dir = base_dir / '5_mosaics' / 'aligned_ready_for_crop'
     mosaics_dir = base_dir / '5_mosaics'
-    
     output_fits_dir = base_dir / '6_patches_final'      
     output_png_dir = base_dir / 'coppie_patch_png'      
     
-    # 2. File Richiesti
     f_h_align = aligned_dir / 'aligned_hubble.fits'
     f_o_align = aligned_dir / 'aligned_observatory.fits'
     f_h_raw   = mosaics_dir / 'final_mosaic_hubble.fits'
@@ -237,14 +224,11 @@ def create_dataset_filtered(base_dir: Path) -> tuple[bool, Path] | None:
         print(f"\n❌ ERRORE: Mancano i file: {missing}")
         return None
 
-    # Setup Cartelle Output
     if output_fits_dir.exists(): shutil.rmtree(output_fits_dir)
     output_fits_dir.mkdir(parents=True, exist_ok=True)
-    
     if output_png_dir.exists(): shutil.rmtree(output_png_dir)
     output_png_dir.mkdir(parents=True, exist_ok=True)
 
-    # 3. Caricamento Dati
     print(f"\n⚙️  Caricamento Dati da {base_dir.name}...")
     try:
         def load_fits(p):
@@ -262,14 +246,12 @@ def create_dataset_filtered(base_dir: Path) -> tuple[bool, Path] | None:
         print(f"❌ Errore caricamento FITS: {e}")
         return None
 
-    # 4. Calcolo Normalizzazione Globale (Robusta)
     print("⚖️  Calcolo livelli di normalizzazione...")
     vmin_h, vmax_h = get_robust_normalization(data_h)
     vmin_o, vmax_o = get_robust_normalization(data_o_raw)
     print(f"   Hubble Range: {vmin_h:.4f} - {vmax_h:.4f}")
     print(f"   Obs Range:    {vmin_o:.4f} - {vmax_o:.4f}")
 
-    # 5. Estrazione Patch
     h_dim, w_dim = data_h.shape
     y_list = list(range(0, h_dim - HR_SIZE + 1, STRIDE))
     x_list = list(range(0, w_dim - HR_SIZE + 1, STRIDE))
@@ -282,31 +264,25 @@ def create_dataset_filtered(base_dir: Path) -> tuple[bool, Path] | None:
     with tqdm(total=total, unit="patch") as pbar:
         for y in y_list:
             for x in x_list:
-                # Estrai Crop
                 patch_h = data_h[y:y+HR_SIZE, x:x+HR_SIZE]
                 patch_o_big = data_o[y:y+HR_SIZE, x:x+HR_SIZE]
                 
-                # Filtro Copertura
                 valid_px = np.count_nonzero(patch_h > MIN_PIXEL_VALUE)
                 if (valid_px / patch_h.size) < MIN_COVERAGE:
                     skipped += 1
                     pbar.update(1)
                     continue
 
-                # Resize Obs per input modello
                 patch_o_lr = resize(patch_o_big, (LR_SIZE, LR_SIZE), 
                                   anti_aliasing=True, preserve_range=True).astype(np.float32)
 
-                # Salva FITS
                 pair_path = output_fits_dir / f"pair_{count:05d}"
                 pair_path.mkdir()
                 fits.PrimaryHDU(patch_h.astype(np.float32), header=header_h).writeto(pair_path/"hubble.fits")
-                
                 h_lr = header_h.copy()
                 h_lr['NAXIS1'], h_lr['NAXIS2'] = LR_SIZE, LR_SIZE
                 fits.PrimaryHDU(patch_o_lr, header=h_lr).writeto(pair_path/"observatory.fits")
                 
-                # Salva PNG (Context Card)
                 if count % SAVE_MAP_EVERY_N == 0:
                     save_8panel_card(
                         data_h, data_o, data_h_raw, data_o_raw,
@@ -324,8 +300,6 @@ def create_dataset_filtered(base_dir: Path) -> tuple[bool, Path] | None:
     print(f"🖼️  Visual:  {output_png_dir}")
     return True, base_dir
 
-# --- UTILITY DI INPUT ---
-
 def select_target_directory():
     subdirs = [d for d in ROOT_DATA_DIR.iterdir() if d.is_dir() and d.name not in ['splits', 'logs']]
     if not subdirs: return None
@@ -342,11 +316,8 @@ def ask_continue(base_dir):
     if input("S/n: ").lower() in ['s', '', 'y']:
         subprocess.run([sys.executable, str(next_script), str(base_dir)])
 
-# ================= ENTRY POINT =================
-
 if __name__ == "__main__":
     target = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else select_target_directory()
-    
     if target:
         res = create_dataset_filtered(target)
         if res:
