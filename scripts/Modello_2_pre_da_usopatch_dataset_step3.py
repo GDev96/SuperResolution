@@ -9,8 +9,10 @@ import os
 from pathlib import Path
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
+import sys
 
-# ================= CONFIGURAZIONE PATH =================
+# ================= CONFIGURAZIONE PATH PORTABILE =================
+# La radice del progetto è sempre la cartella sopra lo script (assumendo 'scripts/...')
 CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
 ROOT_DATA_DIR = PROJECT_ROOT / "data"
@@ -27,11 +29,11 @@ def copy_worker(args):
     """Copia la coppia di patch in una cartella split specifica."""
     pair, dest_folder = args
     try:
-        # Crea la sottocartella per la patch (es. /train/pair_00001)
         dest = dest_folder / pair['patch_id']
         dest.mkdir(parents=True, exist_ok=True)
         
         # Le patch sono chiamate hubble.fits e observatory.fits all'interno delle cartelle pair_XXX
+        # Usiamo Path per la compatibilità
         shutil.copy2(pair['hubble_path'], dest / "hubble.fits")
         shutil.copy2(pair['observatory_path'], dest / "observatory.fits")
     except Exception as e:
@@ -56,10 +58,11 @@ def prepare_dataset(target_dir_path):
         obs_file = p / "observatory.fits"
         
         if hubble_file.exists() and obs_file.exists():
+            # Memorizza i path come stringhe assolute per la sicurezza
             valid_pairs.append({
                 "patch_id": p.name, 
-                "hubble_path": str(hubble_file), 
-                "observatory_path": str(obs_file)
+                "hubble_path": str(hubble_file.resolve()), 
+                "observatory_path": str(obs_file.resolve())
             })
 
     print(f"   Patch Valide trovate: {len(valid_pairs)}")
@@ -89,7 +92,6 @@ def prepare_dataset(target_dir_path):
         with ThreadPoolExecutor(max_workers=NUM_WORKERS) as exe:
             list(tqdm(exe.map(copy_worker, tasks), total=len(tasks), desc=f"   Splitting {split}"))
         
-        # Facoltativo: salva un file JSON con la lista dei nomi delle patch
         with open(d_path.parent / f'{split}_list.json', 'w') as f:
             json.dump([d['patch_id'] for d in data], f, indent=4)
 
@@ -97,9 +99,6 @@ def prepare_dataset(target_dir_path):
 
 # ================= MAIN EXECUTION =================
 if __name__ == "__main__":
-    # La funzione principale è pensata per essere chiamata da riga di comando
-    # con il percorso della cartella target, come negli step precedenti.
-    
     if len(sys.argv) > 1:
         # Esecuzione per un singolo target passato come argomento (tipico del subprocess)
         prepare_dataset(Path(sys.argv[1]))
@@ -108,11 +107,11 @@ if __name__ == "__main__":
         print("\n" + "📂"*35)
         print("SELEZIONE CARTELLA TARGET (Split Finale)".center(70))
         print("📂"*35)
+        # Usa il ROOT_DATA_DIR definito in modo portabile
         subdirs = [d for d in ROOT_DATA_DIR.iterdir() if d.is_dir() and d.name not in ['splits', 'logs', '__pycache__']]
         if not subdirs:
             print("❌ Nessuna sottocartella target trovata.")
         
-        # Mostra menu
         print("\nCartelle target disponibili:")
         print(f"   0: ✨ Processa TUTTI i {len(subdirs)} target")
         for i, d in enumerate(subdirs): 

@@ -3,6 +3,7 @@ TRAINING A6000 BUNKER EDITION (48GB VRAM) + TENSORBOARD IMAGES
 Configurazione Blindata anti-OOM.
 Batch Size: 2 | Accumulation: 16
 NOVITÀ: Le immagini di preview vengono caricate su TensorBoard.
+ADATTATO: Per compatibilità Windows/Linux e percorsi relativi.
 """
 
 import argparse
@@ -41,37 +42,49 @@ HARDWARE_CONFIG = {
 }
 
 # ============================================================================
-# PATHS & IMPORTS
+# PATHS & IMPORTS PORTABILI
 # ============================================================================
-PROJECT_ROOT = Path("/root/SuperResolution")
-if not PROJECT_ROOT.exists(): 
-    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# Base del progetto, risolta sempre in modo relativo allo script
+CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
 
 sys.path.insert(0, str(PROJECT_ROOT))
 ROOT_DATA_DIR = PROJECT_ROOT / "data"
 
 try:
+    # Gli import ora funzioneranno grazie a sys.path.insert(0, str(PROJECT_ROOT))
     from src.architecture import HybridSuperResolutionModel
     from src.dataset import AstronomicalDataset
     from src.losses import CombinedLoss
     from src.metrics import Metrics
 except ImportError:
-    sys.exit(f"❌ Errore import src. Assicurati che {PROJECT_ROOT}/src esista.")
+    sys.exit(f"❌ Errore import src. Assicurati che la cartella 'src' esista nella root del progetto: {PROJECT_ROOT}/src")
 
 # ============================================================================
 # UTILS
 # ============================================================================
 def create_json_files_if_missing(split_dir):
+    """
+    Crea i file JSON temporanei per il dataset, usando Path.
+    """
     def scan_split(split_name):
         d = split_dir / split_name
         data = []
         if not d.exists(): return data
+        
         for entry in os.scandir(d):
             if entry.is_dir() and entry.name.startswith("pair_"):
-                lr = os.path.join(entry.path, "observatory.fits")
-                hr = os.path.join(entry.path, "hubble.fits")
-                if os.path.exists(lr) and os.path.exists(hr):
-                    data.append({"patch_id": entry.name, "ground_path": lr, "hubble_path": hr})
+                # Crea percorsi assoluti per la portabilità
+                lr = (d / entry.name / "observatory.fits").resolve()
+                hr = (d / entry.name / "hubble.fits").resolve()
+                
+                if lr.exists() and hr.exists():
+                    data.append({
+                        "patch_id": entry.name, 
+                        # I percorsi salvati nel JSON devono essere stringhe
+                        "ground_path": str(lr), 
+                        "hubble_path": str(hr)
+                    })
         return sorted(data, key=lambda x: x['patch_id'])
 
     print("   📂 Scansione dataset (Train/Val)...")
@@ -81,8 +94,10 @@ def create_json_files_if_missing(split_dir):
     ft = split_dir / "train_temp.json"
     fv = split_dir / "val_temp.json"
     
-    with open(ft, 'w') as f: json.dump(train_list, f)
-    with open(fv, 'w') as f: json.dump(val_list, f)
+    with open(ft, 'w') as f: json.dump(train_list, f, indent=4)
+    with open(fv, 'w') as f: json.dump(val_list, f, indent=4)
+    
+    print(f"   JSON temporanei creati: {len(train_list)} train, {len(val_list)} val.")
     
     return ft, fv
 
@@ -90,26 +105,34 @@ def create_json_files_if_missing(split_dir):
 # TRAIN LOOP
 # ============================================================================
 def train(args, target_dir):
-    device = torch.device('cuda')
-    torch.cuda.empty_cache() 
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if device.type == 'cuda':
+        torch.cuda.empty_cache() 
     
-    print(f"\n🚀 START TRAIN A6000 BUNKER + TB IMAGES: {target_dir.name}")
+    print(f"\n🚀 START TRAIN A6000 BUNKER + TB IMAGES: {target_dir.name} ({device})")
     eff_batch = HARDWARE_CONFIG['batch_size'] * HARDWARE_CONFIG['accum_steps']
     print(f"   🔥 Batch Efficace: {eff_batch}")
     
+    # OUTPUTS basati su PROJECT_ROOT e nome del target
     out_dir = PROJECT_ROOT / "outputs" / target_dir.name
     save_dir = out_dir / "checkpoints"
     log_dir = out_dir / "tensorboard"
     img_dir = out_dir / "images"
     for d in [save_dir, log_dir, img_dir]: d.mkdir(parents=True, exist_ok=True)
     
-    splits_dir = target_dir / "6_patches_aligned" / "splits"
+    # Assumiamo che lo split sia nella cartella delle patch finali
+    # Modificato da '6_patches_aligned' (nome vecchio) a '6_patches_final' (nome nuovo)
+    # oppure crea il percorso in base a dove lo script di split salva (Modello_2_pre_da_usopatch_dataset_step3.py salva in '6_patches_final/splits')
+    
+    # Se Modello_2_pre_da_usopatch_dataset_step3.py è lo Step 4 che hai fornito:
+    splits_dir = target_dir / "6_patches_final" / "splits" 
+    
     if not splits_dir.exists():
-        sys.exit(f"❌ Splits non trovati in {splits_dir}.")
+        sys.exit(f"❌ Splits non trovati in {splits_dir}. Assicurati di aver eseguito lo Step 4.")
 
     json_train, json_val = create_json_files_if_missing(splits_dir)
     
-    # Dataset
+    # Dataset (base_path è PROJECT_ROOT per risolvere i percorsi 'src' e data)
     train_ds = AstronomicalDataset(json_train, base_path=PROJECT_ROOT, augment=True)
     val_ds = AstronomicalDataset(json_val, base_path=PROJECT_ROOT, augment=False)
     
@@ -126,6 +149,7 @@ def train(args, target_dir):
     
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=4, pin_memory=True)
     
+    # Pulisce i JSON temporanei
     if json_train.exists(): json_train.unlink()
     if json_val.exists(): json_val.unlink()
 
@@ -137,14 +161,18 @@ def train(args, target_dir):
     ).to(device)
     
     if args.resume:
-        print(f"   📥 Resuming: {args.resume}")
-        model.load_state_dict(torch.load(args.resume))
+        resume_path = Path(args.resume)
+        if resume_path.exists():
+            print(f"   📥 Resuming: {resume_path.name}")
+            model.load_state_dict(torch.load(resume_path, map_location=device))
+        else:
+             print(f"   ⚠️ File di resume non trovato: {resume_path}")
 
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     criterion = CombinedLoss().to(device)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
     
-    scaler = torch.amp.GradScaler('cuda')
+    scaler = GradScaler() if device.type == 'cuda' else None
     writer = SummaryWriter(str(log_dir))
     
     best_loss = float('inf')
@@ -164,18 +192,25 @@ def train(args, target_dir):
             lr = batch['lr'].to(device, non_blocking=True) 
             hr = batch['hr'].to(device, non_blocking=True)
             
-            with torch.amp.autocast('cuda'):
+            with torch.amp.autocast('cuda') if device.type == 'cuda' else torch.no_grad():
                 pred = model(lr) 
                 loss, _ = criterion(pred, hr)
                 loss = loss / accum_steps 
             
-            scaler.scale(loss).backward()
+            if scaler:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
             
             if (i + 1) % accum_steps == 0:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                scaler.step(optimizer)
-                scaler.update()
+                if scaler:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
             
             current_loss = loss.item() * accum_steps
@@ -198,7 +233,7 @@ def train(args, target_dir):
                 lr = batch['lr'].to(device, non_blocking=True)
                 hr = batch['hr'].to(device, non_blocking=True)
                 
-                with torch.amp.autocast('cuda'):
+                with torch.amp.autocast('cuda') if device.type == 'cuda' else torch.no_grad():
                     pred = model(lr)
                     v_loss, _ = criterion(pred, hr)
                 
@@ -217,9 +252,8 @@ def train(args, target_dir):
                     vutils.save_image(comp, img_dir / f"val_ep_{epoch+1}.png", normalize=False)
                     
                     # 2. Manda a TENSORBOARD (Tab IMAGES)
-                    # .squeeze(0) rimuove la dimensione batch [1, C, H, W] -> [C, H, W]
-                    # .clamp(0, 1) assicura che i colori non siano "bruciati" nel visualizzatore
-                    writer.add_image('Validation/Preview (Input | AI | Target)', comp.squeeze(0).clamp(0, 1), epoch)
+                    # Comp.cpu() + .float() per evitare problemi di tipo con Tensorboard
+                    writer.add_image('Validation/Preview (Input | AI | Target)', comp.squeeze(0).cpu().float().clamp(0, 1), epoch)
                 # =================================================
             
         res = metrics.compute()
@@ -233,6 +267,7 @@ def train(args, target_dir):
         
         scheduler.step(avg_val_loss)
         
+        # Salvataggio checkpoint usando Path
         torch.save(model.state_dict(), save_dir / "last.pth")
         if avg_val_loss < best_loss:
             best_loss = avg_val_loss
@@ -251,11 +286,15 @@ if __name__ == "__main__":
     if args.target:
         train(args, ROOT_DATA_DIR / args.target)
     else:
-        valid = [d for d in ROOT_DATA_DIR.iterdir() if (d / "6_patches_aligned" / "splits").exists()]
+        # Ricerca target basata sulla presenza della cartella splits
+        valid = [d for d in ROOT_DATA_DIR.iterdir() if (d / "6_patches_final" / "splits").exists()]
         if len(valid) == 1:
             train(args, valid[0])
         elif len(valid) > 1:
+            print("\nTarget disponibili per il Training:")
+            for i, d in enumerate(valid): print(f"{i+1}: {d.name}")
             try:
-                s = int(input(f"Target ({[d.name for d in valid]}): ")) - 1
-                train(args, valid[s])
+                s = int(input(f"Seleziona (1-{len(valid)}): ")) - 1
+                if 0 <= s < len(valid):
+                    train(args, valid[s])
             except: pass
