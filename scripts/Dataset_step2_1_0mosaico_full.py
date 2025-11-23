@@ -1,3 +1,4 @@
+
 """
 STEP 2: CREAZIONE MOSAICO WCS (SELETTIVO PER SORGENTE)
 Permette di scegliere:
@@ -145,24 +146,33 @@ def select_source_mode(target_name):
         except ValueError:
             print("❌ Input non valido.")
 
-def ask_continue_to_next_step(successful_targets, logger):
-    """Chiede se proseguire con il prossimo script."""
+def ask_next_step_mode(successful_targets):
+    """
+    Chiede all'utente quale percorso seguire dopo il mosaico.
+    BOTTONI INVERTITI COME RICHIESTO.
+    """
     print("\n" + "="*70)
-    print("🎯 ELABORAZIONE MOSAICO COMPLETATA!")
+    print("🎯 STEP 2 (MOSAICO) COMPLETATO!")
     print("="*70)
-    print("\n📋 OPZIONI:")
-    print("   1️⃣  Continua con Step 3 (Analisi Patch - step3_analizzapatch.py)")
-    print("   2️⃣  Termina qui")
+    print("\n📋 COSA VUOI FARE ORA?")
     
-    next_script_name = 'Dataset_step3_analizzapatch.py'
+    # --- BOTTONI INVERTITI ---
+    print("   1️⃣  Procedi con lo Step Successivo (Standard)")
+    print("        (Esegue: Dataset_step2_2_FINALE.py)")
+    print("   2️⃣  [OPZIONALE] Migliora Orientamento Hubble (North-Up)")
+    print("        (Esegue: Dataset_step2_1_1(OPZIONALE)_FINALE.py)")
+    print("   3️⃣  Esci")
     
     while True:
         print("\n" + "─"*70)
-        choice = input(f"👉 Vuoi continuare con '{next_script_name}'? [S/n, default=S]: ").strip().lower()
-        if choice in ('', 's', 'si', 'y', 'yes'):
-            return True
-        elif choice in ('n', 'no'):
-            return False
+        choice = input(f"👉 Scelta (1=Next, 2=Optional, 3=Esci): ").strip()
+        
+        if choice == '1':
+            return 'standard'
+        elif choice == '2':
+            return 'optional'
+        elif choice == '3':
+            return None
         else:
             print("❌ Scelta non valida.")
 
@@ -519,19 +529,31 @@ def main():
     if not successful_targets:
         return
 
-    # Transizione al prossimo step
-    if ask_continue_to_next_step(successful_targets, logger):
-        try:
-            next_script = SCRIPTS_DIR / 'Dataset_step3_analizzapatch.py'
-            if next_script.exists():
-                print(f"\n🚀 Avvio Step 3 per {len(successful_targets)} target...")
-                for base_dir in successful_targets:
-                    print(f"\n--- Avvio per {base_dir.name} ---")
-                    subprocess.run([sys.executable, str(next_script), str(base_dir)])
-            else:
-                print(f"\n⚠️  Script {next_script.name} non trovato in {SCRIPTS_DIR}")
-        except Exception as e:
-            print(f"❌ Errore avvio script successivo: {e}")
+    # Transizione al prossimo step (BIVIO)
+    mode = ask_next_step_mode(successful_targets)
+    
+    # --- MAPPA IL MODO AI NOMI FILE RICHIESTI ---
+    if mode == 'standard':
+        # Opzione 1 (Standard) -> Step 2.2
+        next_script = SCRIPTS_DIR / 'Dataset_step2_2_FINALE.py'
+    elif mode == 'optional':
+        # Opzione 2 (Opzionale) -> Step 2.1.1
+        next_script = SCRIPTS_DIR / 'Dataset_step2_1_1(OPZIONALE)_FINALE.py'
+    else:
+        print("\n👋 Uscita.")
+        return
+
+    try:
+        if next_script.exists():
+            print(f"\n🚀 Avvio {next_script.name} per {len(successful_targets)} target...")
+            for base_dir in successful_targets:
+                print(f"\n--- Avvio per {base_dir.name} ---")
+                subprocess.run([sys.executable, str(next_script), str(base_dir)])
+        else:
+            print(f"\n⚠️  Script {next_script.name} non trovato in {SCRIPTS_DIR}")
+            print("   Assicurati che il file esista con questo nome esatto.")
+    except Exception as e:
+        print(f"❌ Errore avvio script successivo: {e}")
 
 if __name__ == "__main__":
     main()
