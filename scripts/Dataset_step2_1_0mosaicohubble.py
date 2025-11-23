@@ -1,10 +1,13 @@
 """
-STEP 2: CREAZIONE MOSAICO USANDO WCS
-Crea un mosaico usando le coordinate WCS per allineare immagini di dimensioni diverse
+STEP 3+4: RITAGLIO IMMAGINI REGISTRATE E CREAZIONE MOSAICO (SOLO HUBBLE)
 
-INPUT: Cartelle '3_registered_native/hubble' e '3_registered_native/observatory'
+1. Ritaglia tutte le immagini registrate nella cartella hubble alle dimensioni dell'immagine più piccola (centrato).
+2. Crea un mosaico (media) da tutte le immagini ritagliate di hubble.
+
+INPUT: Esclusivamente la cartella '3_registered_native/hubble' (la cartella 'observatory' è ignorata).
 OUTPUT: 
-  - File '5_mosaics/final_mosaic.fits' con il mosaico finale
+  - Cartella '4_cropped/hubble' con immagini ritagliate.
+  - File '5_mosaics/final_mosaic_hubble.fits' (Nome del mosaico modificato per coerenza).
 """
 
 import os
@@ -16,15 +19,15 @@ from datetime import datetime
 from pathlib import Path
 import numpy as np
 from astropy.io import fits
-from astropy.wcs import WCS
 from tqdm import tqdm
 import warnings
 import subprocess
 
+# Suppress warnings, especially from FITS/WCS header handling
 warnings.filterwarnings('ignore')
 
 # ============================================================================
-# CONFIGURAZIONE PATH DINAMICI (UNIVERSALI)
+# CONFIGURAZIONE PATH DINAMICI
 # ============================================================================
 CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
@@ -37,40 +40,42 @@ SCRIPTS_DIR = CURRENT_SCRIPT_DIR
 # ============================================================================
 
 def setup_logging():
-    """Configura logging."""
+    """Configura il sistema di logging."""
     os.makedirs(LOG_DIR_ROOT, exist_ok=True)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_filename = LOG_DIR_ROOT / f'mosaic_{timestamp}.log'
+    log_filename = LOG_DIR_ROOT / f'crop_mosaic_hubble_{timestamp}.log'
     
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
         handlers=[
             logging.FileHandler(log_filename, encoding='utf-8'),
-            logging.StreamHandler()
+            logging.StreamHandler(sys.stdout)
         ]
     )
-    logger = logging.getLogger(__name__)
-    return logger
+    return logging.getLogger(__name__)
 
 # ============================================================================
 # FUNZIONI MENU E SELEZIONE
 # ============================================================================
 
-def select_target_directory():
+def select_target_directory(logger):
     """Mostra un menu per selezionare una o TUTTE le cartelle target."""
+    logger.info("Avvio selezione cartella target.")
     print("\n" + "📂"*35)
     print("SELEZIONE CARTELLA TARGET".center(70))
     print("📂"*35)
-    print(f"\nScansione sottocartelle in: {ROOT_DATA_DIR}")
-
+    
     try:
-        subdirs = [d for d in ROOT_DATA_DIR.iterdir() if d.is_dir() and d.name not in ['splits', 'logs']]
+        # Filtra solo le sottocartelle valide in ROOT_DATA_DIR
+        subdirs = [d for d in ROOT_DATA_DIR.iterdir() if d.is_dir() and d.name not in ['splits', 'logs', '__pycache__']]
     except Exception as e:
+        logger.error(f"Impossibile leggere la cartella {ROOT_DATA_DIR}: {e}")
         print(f"\n❌ ERRORE: Impossibile leggere la cartella {ROOT_DATA_DIR}: {e}")
         return []
 
     if not subdirs:
+        logger.warning(f"Nessuna sottocartella target trovata in {ROOT_DATA_DIR}")
         print(f"\n❌ ERRORE: Nessuna sottocartella trovata in {ROOT_DATA_DIR}")
         return []
 
@@ -91,33 +96,33 @@ def select_target_directory():
             choice = int(choice_str)
 
             if choice == 0:
+                logger.info(f"Selezionati TUTTI i {len(subdirs)} target.")
                 print(f"\n✅ Selezionati TUTTI i {len(subdirs)} target.")
                 return subdirs 
             
             choice_idx = choice - 1
             if 0 <= choice_idx < len(subdirs):
                 selected_dir = subdirs[choice_idx]
+                logger.info(f"Cartella selezionata: {selected_dir.name}")
                 print(f"\n✅ Cartella selezionata: {selected_dir.name}")
                 return [selected_dir]
             else:
-                print(f"❌ Scelta non valida.")
+                print("❌ Scelta non valida.")
         except ValueError:
-            print("❌ Input non valido.")
+            print("❌ Input non valido. Inserisci un numero.")
 
 def ask_continue_to_next_step():
-    """Chiede se proseguire con il prossimo script."""
+    """Chiede se proseguire con il prossimo script (Step 5)."""
     print("\n" + "="*70)
-    print("🎯 MOSAICO COMPLETATO!")
+    print("🎯 STEP 3+4 (Crop e Mosaico) COMPLETATI!")
     print("="*70)
-    print("\n📋 OPZIONI:")
-    print("   1️⃣  Continua con Step 3 (Analisi Patch - step3_analizzapatch.py)")
-    print("   2️⃣  Termina qui")
     
     next_script_name = 'Dataset_step3_analizzapatch.py'
+    print(f"\n📋 Prossimo Step: Analisi Patch ('{next_script_name}')")
     
     while True:
         print("\n" + "─"*70)
-        choice = input(f"👉 Vuoi continuare con '{next_script_name}'? [S/n, default=S]: ").strip().lower()
+        choice = input("👉 Vuoi continuare con lo Step 5? [S/n, default=S]: ").strip().lower()
         if choice in ('', 's', 'si', 'y', 'yes'):
             return True
         elif choice in ('n', 'no'):
@@ -126,279 +131,210 @@ def ask_continue_to_next_step():
             print("❌ Scelta non valida.")
 
 # ============================================================================
-# FUNZIONI - MOSAICO CON WCS
+# FUNZIONI DI RITAGLIO (CROP)
 # ============================================================================
 
-def calculate_common_grid(image_infos):
-    """
-    Calcola una griglia comune che copre tutte le immagini usando WCS.
+def find_smallest_dimensions(all_files, logger):
+    """Trova le dimensioni dell'immagine 2D più piccola tra tutti i file FITS."""
+    logger.info("Ricerca dimensioni minime tra le immagini registrate.")
+    print("\n🔍 Ricerca dimensioni minime...")
     
-    Returns:
-        tuple: (output_wcs, output_shape)
-    """
-    print("\n🔍 Calcolo griglia comune...")
+    min_height, min_width = float('inf'), float('inf')
+    smallest_file = None
     
-    # Trova i limiti del campo totale
-    ra_min = float('inf')
-    ra_max = float('-inf')
-    dec_min = float('inf')
-    dec_max = float('-inf')
-    
-    pixel_scales = []
-    
-    for info in image_infos:
-        wcs = info['wcs']
-        shape = info['shape']
-        ny, nx = shape
-        
-        # Coordinate dei 4 angoli
-        corners_pix = np.array([
-            [0, 0], [nx-1, 0], [0, ny-1], [nx-1, ny-1]
-        ])
-        
-        try:
-            corners_world = wcs.pixel_to_world(corners_pix[:, 0], corners_pix[:, 1])
-            
-            for coord in corners_world:
-                ra = coord.ra.deg
-                dec = coord.dec.deg
-                ra_min = min(ra_min, ra)
-                ra_max = max(ra_max, ra)
-                dec_min = min(dec_min, dec)
-                dec_max = max(dec_max, dec)
-        except:
-            continue
-        
-        # Calcola pixel scale
-        try:
-            if hasattr(wcs.wcs, 'cd') and wcs.wcs.cd is not None:
-                cd = wcs.wcs.cd
-                pixel_scale = np.sqrt(cd[0,0]**2 + cd[0,1]**2)
-            else:
-                pixel_scale = abs(wcs.wcs.cdelt[0])
-            pixel_scales.append(pixel_scale)
-        except:
-            continue
-    
-    # Gestione wraparound RA
-    if ra_max - ra_min > 180:
-        print("   ⚠️  Rilevato wraparound RA vicino a 0°/360°")
-    
-    # Centro del campo
-    ra_center = (ra_min + ra_max) / 2.0
-    dec_center = (dec_min + dec_max) / 2.0
-    
-    # Dimensioni campo
-    ra_span = ra_max - ra_min
-    dec_span = dec_max - dec_min
-    
-    # Usa il pixel scale più fine (minore) per preservare i dettagli
-    target_pixel_scale = min(pixel_scales) if pixel_scales else 0.0001  # deg/px
-    
-    # Calcola dimensioni output
-    nx_out = int(np.ceil(abs(ra_span / np.cos(np.radians(dec_center))) / target_pixel_scale))
-    ny_out = int(np.ceil(abs(dec_span) / target_pixel_scale))
-    
-    # TELA QUADRATA: usa la dimensione maggiore per entrambi i lati
-    max_dim = max(nx_out, ny_out)
-    nx_out = max_dim
-    ny_out = max_dim
-    
-    # Limita dimensioni massime
-    MAX_DIM = 20000
-    if max_dim > MAX_DIM:
-        nx_out = MAX_DIM
-        ny_out = MAX_DIM
-        target_pixel_scale *= (max_dim / MAX_DIM)
-    
-    print(f"   Centro: RA={ra_center:.4f}°, DEC={dec_center:.4f}°")
-    print(f"   Span: RA={ra_span:.4f}° ({ra_span*60:.1f}'), DEC={dec_span:.4f}° ({dec_span*60:.1f}')")
-    print(f"   Pixel scale: {target_pixel_scale*3600:.4f}\"/px")
-    print(f"   Dimensioni output: {nx_out} x {ny_out} pixel ⬜ (QUADRATA)")
-    
-    # Crea WCS output
-    output_wcs = WCS(naxis=2)
-    output_wcs.wcs.ctype = ['RA---TAN', 'DEC--TAN']
-    output_wcs.wcs.crval = [ra_center, dec_center]
-    output_wcs.wcs.crpix = [nx_out / 2.0, ny_out / 2.0]
-    output_wcs.wcs.cdelt = [-target_pixel_scale, target_pixel_scale]
-    output_wcs.wcs.radesys = 'ICRS'
-    output_wcs.wcs.equinox = 2000.0
-    
-    return output_wcs, (ny_out, nx_out)
-
-
-def create_mosaic_wcs(base_dir):
-    """Crea il mosaico usando WCS per allineare immagini di dimensioni diverse."""
-    print("\n" + "🖼️ "*35)
-    print(f"MOSAICO WCS: {base_dir.name}".center(70))
-    print("🖼️ "*35)
-    
-    # Path
-    input_dirs = [
-        base_dir / '3_registered_native' / 'hubble',
-        base_dir / '3_registered_native' / 'observatory'
-    ]
-    
-    mosaic_output_dir = base_dir / '5_mosaics'
-    mosaic_output_file = mosaic_output_dir / 'final_mosaic.fits'
-    
-    # Crea cartella output
-    mosaic_output_dir.mkdir(parents=True, exist_ok=True)
-    
-    # 1. Trova tutti i file FITS e carica info WCS
-    print("\n📂 Caricamento immagini...")
-    all_files = []
-    for d in input_dirs:
-        if d.exists():
-            all_files.extend(list(d.glob('*.fits')) + list(d.glob('*.fit')))
-    
-    if not all_files:
-        print(f"\n❌ ERRORE: Nessun file FITS trovato.")
-        return False
-    
-    print(f"✅ Trovati {len(all_files)} file FITS")
-    
-    # Carica informazioni WCS
-    image_infos = []
-    for filepath in tqdm(all_files, desc="Lettura WCS", unit="file"):
+    for filepath in tqdm(all_files, desc="Scansione", unit="file"):
         try:
             with fits.open(filepath) as hdul:
-                # Cerca HDU con dati
-                data = None
-                header = None
-                for hdu in hdul:
-                    if hdu.data is not None and hdu.data.size > 0:
-                        data = hdu.data
-                        header = hdu.header
-                        break
+                data_shape = hdul[0].data.shape
                 
-                if data is None:
+                if len(data_shape) == 3:
+                    height, width = data_shape[1], data_shape[2]
+                elif len(data_shape) == 2:
+                    height, width = data_shape
+                else:
                     continue
                 
-                # Gestisci 3D
-                if len(data.shape) == 3:
-                    data = data[0]
+                # Aggiorna le dimensioni minime
+                if height < min_height: min_height = height
+                if width < min_width: min_width = width
                 
-                # Verifica WCS
-                wcs = WCS(header)
-                if not wcs.has_celestial:
-                    print(f"\n⚠️  {filepath.name}: WCS non valido, saltato")
-                    continue
-                
-                image_infos.append({
-                    'file': filepath,
-                    'data': data,
-                    'header': header,
-                    'wcs': wcs,
-                    'shape': data.shape
-                })
-                
+                if height == min_height and width == min_width:
+                    smallest_file = filepath
+                    
         except Exception as e:
-            print(f"\n⚠️  Errore leggendo {filepath.name}: {e}")
+            logger.warning(f"Impossibile leggere {filepath}: {e}")
             continue
     
-    if not image_infos:
-        print(f"\n❌ ERRORE: Nessuna immagine con WCS valido trovata.")
+    if min_height == float('inf') or min_width == float('inf'):
+        logger.error("Nessuna dimensione valida trovata.")
+        return 0, 0
+        
+    logger.info(f"Dimensioni minime: {min_width} x {min_height}")
+    print(f"\n✅ Dimensioni minime trovate: {min_width} x {min_height} pixel")
+    if smallest_file:
+        print(f"   File più piccolo: {Path(smallest_file).name}")
+    return min_height, min_width
+
+
+def crop_image(input_path, output_path, target_height, target_width, logger):
+    """Ritaglia un'immagine FITS alle dimensioni target (centrato) e aggiorna l'header."""
+    try:
+        with fits.open(input_path) as hdul:
+            data = hdul[0].data
+            header = hdul[0].header.copy()
+            
+            if len(data.shape) == 3:
+                data = data[0]
+            
+            current_height, current_width = data.shape
+            
+            y_offset = (current_height - target_height) // 2
+            x_offset = (current_width - target_width) // 2
+            
+            cropped_data = data[
+                y_offset : y_offset + target_height,
+                x_offset : x_offset + target_width
+            ]
+            
+            # Aggiorna il WCS (World Coordinate System) nell'header
+            if 'CRPIX1' in header: header['CRPIX1'] -= x_offset
+            if 'CRPIX2' in header: header['CRPIX2'] -= y_offset
+            
+            header['NAXIS1'] = target_width
+            header['NAXIS2'] = target_height
+            header['HISTORY'] = f"Cropped to {target_width}x{target_height} centered"
+
+            fits.PrimaryHDU(data=cropped_data, header=header).writeto(
+                output_path, overwrite=True
+            )
+            return True
+            
+    except Exception as e:
+        logger.error(f"ERRORE nel ritaglio di {input_path.name}: {e}")
+        return False
+
+
+def crop_all_images_for_target(base_dir, logger):
+    """Coordina la ricerca delle dimensioni minime e il ritaglio batch (SOLO HUBBLE)."""
+    logger.info(f"Avvio ritaglio per target: {base_dir.name} (SOLO HUBBLE)")
+    print("\n" + "✂️ "*35)
+    print(f"RITAGLIO: {base_dir.name} (SOLO HUBBLE)".center(70))
+    print("✂️ "*35)
+    
+    # Cartella di input UNICA (Hubble)
+    input_dir_hubble = base_dir / '3_registered_native' / 'hubble'
+    
+    # Cartella di output
+    output_dir_base = base_dir / '4_cropped'
+    output_dir_hubble = output_dir_base / 'hubble'
+    
+    output_dir_hubble.mkdir(parents=True, exist_ok=True)
+    
+    all_files = list(input_dir_hubble.glob('*.fits')) + list(input_dir_hubble.glob('*.fit'))
+    
+    logger.info(f"Trovati {len(all_files)} file in Hubble.")
+    print(f"   Hubble: {len(all_files)} file trovati")
+    
+    if not all_files:
+        logger.error("Nessun file trovato per il ritaglio in Hubble.")
+        print(f"\n❌ ERRORE: Nessun file FITS in {input_dir_hubble}.")
         return False
     
-    print(f"✅ {len(image_infos)} immagini con WCS valido")
+    # 1. Trova le dimensioni target
+    min_height, min_width = find_smallest_dimensions(all_files, logger)
+    if min_height == 0 or min_width == 0:
+        return False
+        
+    print(f"\n📐 Target: {min_width} x {min_height} pixel")
     
-    # 2. Calcola griglia comune
-    output_wcs, output_shape = calculate_common_grid(image_infos)
+    # 2. Esegue il ritaglio
+    success_count = 0
+    for filepath in tqdm(all_files, desc="Ritaglio Hubble", unit="file"):
+        output_filepath = output_dir_hubble / filepath.name
+        
+        if crop_image(filepath, output_filepath, min_height, min_width, logger):
+            success_count += 1
+        
+    logger.info(f"Ritaglio completato. {success_count} file ritagliati.")
+    return success_count > 0
+
+# ============================================================================
+# FUNZIONI DI MOSAICO (STACKING E MEDIA)
+# ============================================================================
+
+def create_mosaic_for_target(base_dir, logger):
+    """Crea un mosaico (media) da tutte le immagini ritagliate di Hubble."""
+    logger.info(f"Avvio creazione mosaico per target: {base_dir.name} (SOLO HUBBLE)")
+    print("\n" + "🖼️ "*35)
+    print(f"MOSAICO: {base_dir.name} (SOLO HUBBLE)".center(70))
+    print("🖼️ "*35)
     
-    # 3. Crea array per mosaico
-    print("\n🔄 Creazione mosaico...")
-    mosaic_data = np.zeros(output_shape, dtype=np.float64)
-    mosaic_weight = np.zeros(output_shape, dtype=np.float64)
+    output_dir_base = base_dir / '4_cropped'
     
-    # 4. Proietta ogni immagine sulla griglia comune
-    for info in tqdm(image_infos, desc="Proiezione", unit="immagine"):
-        try:
-            data = info['data']
-            wcs_in = info['wcs']
-            shape_in = info['shape']
-            
-            # Per ogni pixel dell'immagine input, trova dove cade nell'output
-            ny_in, nx_in = shape_in
-            
-            # Crea griglia di coordinate pixel input
-            y_in, x_in = np.mgrid[0:ny_in, 0:nx_in]
-            
-            # Converti in coordinate mondo
-            try:
-                coords_world = wcs_in.pixel_to_world(x_in.ravel(), y_in.ravel())
-                
-                # Converti in coordinate pixel output
-                x_out, y_out = output_wcs.world_to_pixel(coords_world)
-                
-                # Arrotonda a pixel interi
-                x_out = np.round(x_out).astype(int)
-                y_out = np.round(y_out).astype(int)
-                
-                # Reshape
-                x_out = x_out.reshape(shape_in)
-                y_out = y_out.reshape(shape_in)
-                
-                # Filtra pixel validi (dentro i bounds dell'output)
-                valid = (x_out >= 0) & (x_out < output_shape[1]) & \
-                        (y_out >= 0) & (y_out < output_shape[0]) & \
-                        ~np.isnan(data)
-                
-                # Aggiungi al mosaico
-                y_valid = y_out[valid]
-                x_valid = x_out[valid]
-                data_valid = data[valid]
-                
-                mosaic_data[y_valid, x_valid] += data_valid
-                mosaic_weight[y_valid, x_valid] += 1.0
-                
-            except Exception as e:
-                print(f"\n⚠️  Errore proiettando {info['file'].name}: {e}")
-                continue
-                
-        except Exception as e:
-            print(f"\n⚠️  Errore processando {info['file'].name}: {e}")
-            continue
-    
-    # 5. Calcola media
-    print("\n🧮 Calcolo della media finale...")
-    
-    # Evita divisione per zero
-    with np.errstate(divide='ignore', invalid='ignore'):
-        mosaic_final = np.where(mosaic_weight > 0, 
-                                mosaic_data / mosaic_weight, 
-                                np.nan)
-    
-    # Statistiche
-    valid_pixels = np.sum(~np.isnan(mosaic_final))
-    total_pixels = mosaic_final.size
-    coverage = (valid_pixels / total_pixels) * 100
-    
-    print(f"📊 Statistiche mosaico:")
-    print(f"   Dimensioni: {output_shape[1]} x {output_shape[0]} pixel")
-    print(f"   Pixel validi: {valid_pixels}")
-    print(f"   Copertura: {coverage:.1f}%")
-    print(f"   Immagini combinate: {len(image_infos)}")
-    
-    # 6. Salva
-    print(f"\n💾 Salvataggio mosaico...")
-    
-    # Crea header dal WCS output
-    output_header = output_wcs.to_header()
-    output_header['HISTORY'] = 'Mosaico creato usando WCS'
-    output_header['NCOMBINE'] = (len(image_infos), 'Numero di immagini combinate')
-    output_header['COVERAGE'] = (coverage, 'Percentuale copertura')
-    output_header['NPIXVAL'] = (valid_pixels, 'Numero pixel validi')
+    # Cerca solo i file Hubble ritagliati
+    all_files = list((output_dir_base / 'hubble').glob('*.fits'))
+        
+    if not all_files:
+        logger.error("Nessun file ritagliato di Hubble trovato per il mosaico.")
+        print(f"\n❌ ERRORE: Nessun file FITS ritagliato di Hubble trovato per il mosaico.")
+        return False
     
     try:
-        fits.PrimaryHDU(data=mosaic_final.astype(np.float32), 
-                       header=output_header).writeto(mosaic_output_file, overwrite=True)
+        # Usa il primo file ritagliato come template per header e shape
+        with fits.open(all_files[0]) as hdul:
+            template_header = hdul[0].header.copy()
+            data_shape = hdul[0].data.shape
+            shape = data_shape if len(data_shape) == 2 else data_shape[1:]
     except Exception as e:
-        print(f"\n❌ ERRORE: Impossibile salvare: {e}")
+        logger.error(f"Errore lettura file template: {e}")
         return False
+        
+    # Inizializza le matrici di stacking
+    total_flux = np.zeros(shape, dtype=np.float64)
+    n_pixels = np.zeros(shape, dtype=np.int32)
     
-    print(f"\n✅ MOSAICO COMPLETATO: {mosaic_output_file}")
+    logger.info(f"Combinazione {len(all_files)} immagini di dimensione {shape}...")
+    print("\n🔄 Combinazione immagini...")
+    
+    for filepath in tqdm(all_files, desc="Stacking Hubble", unit="file"):
+        try:
+            with fits.open(filepath) as hdul:
+                d = hdul[0].data
+                if len(d.shape) == 3: d = d[0]
+                
+                if d.shape != shape: continue
+                
+                valid = ~np.isnan(d) & (d != 0) 
+                d_clean = np.nan_to_num(d, nan=0.0)
+                
+                total_flux += d_clean
+                n_pixels[valid] += 1
+        except Exception as e: 
+            logger.warning(f"Skippato file {filepath.name} durante lo stacking: {e}")
+            continue
+            
+    # Calcolo della media
+    logger.info("Calcolo della media aritmetica.")
+    print("\n🧮 Calcolo media...")
+    
+    mosaic_data = np.full(shape, np.nan, dtype=np.float32)
+    valid_stack = n_pixels > 0
+    
+    with np.errstate(divide='ignore', invalid='ignore'):
+        mosaic_data[valid_stack] = (total_flux[valid_stack] / n_pixels[valid_stack]).astype(np.float32)
+    
+    # Salvataggio
+    mosaic_out = base_dir / '5_mosaics'
+    mosaic_out.mkdir(parents=True, exist_ok=True)
+    
+    # Nome del file modificato per riflettere l'origine dei dati (SOLO HUBBLE)
+    final_path = mosaic_out / 'final_mosaic_hubble.fits'
+    
+    template_header['HISTORY'] = 'Mosaic created by cropping and stacking (average) - ONLY HUBBLE'
+    fits.PrimaryHDU(data=mosaic_data, header=template_header).writeto(final_path, overwrite=True)
+    
+    logger.info(f"Mosaico salvato con successo: {final_path.name}")
+    print(f"\n✅ MOSAICO SALVATO: {final_path.name}")
     return True
 
 # ============================================================================
@@ -406,64 +342,68 @@ def create_mosaic_wcs(base_dir):
 # ============================================================================
 
 def main():
-    """Funzione principale."""
     logger = setup_logging()
     
-    # Selezione Target
-    target_dirs = select_target_directory()
-    if not target_dirs:
-        return
+    # GESTIONE INPUT AUTOMATIZZATA (da script precedente) o MANUALE
+    if len(sys.argv) > 1:
+        input_path = Path(sys.argv[1]).resolve()
+        if input_path.exists():
+            print(f"\n🤖 Modalità Automatica: Target ricevuto {input_path.name}")
+            target_dirs = [input_path]
+        else:
+            logger.error(f"Path fornito non valido: {input_path}")
+            return
+    else:
+        target_dirs = select_target_directory(logger)
+        if not target_dirs: return
 
     logger.info(f"Inizio batch su {len(target_dirs)} target")
-    
     print("\n" + "="*70)
-    print("PIPELINE: CREAZIONE MOSAICO WCS (BATCH)".center(70))
+    print("PIPELINE: RITAGLIO + MOSAICO (SOLO HUBBLE)".center(70))
     print("="*70)
     
     start_time_total = time.time()
     successful_targets = []
-    failed_targets = []
     
     for base_dir in target_dirs:
-        print("\n" + "🚀"*35)
-        print(f"ELABORAZIONE TARGET: {base_dir.name}".center(70))
-        print("🚀"*35)
+        print("\n" + "─"*70)
+        logger.info(f"Processing target: {base_dir.name}")
         
-        # Crea mosaico
-        if not create_mosaic_wcs(base_dir):
-            print(f"\n❌ Target {base_dir.name} fallito.")
-            failed_targets.append(base_dir)
+        # STEP 3: Ritaglio (Crop) - SOLO HUBBLE
+        if not crop_all_images_for_target(base_dir, logger): 
+            logger.error(f"STEP 3 (Ritaglio Hubble) fallito per {base_dir.name}")
+            continue
+            
+        # STEP 4: Mosaico (Stacking) - SOLO HUBBLE
+        if not create_mosaic_for_target(base_dir, logger): 
+            logger.error(f"STEP 4 (Mosaico Hubble) fallito per {base_dir.name}")
             continue
             
         successful_targets.append(base_dir)
-        logger.info(f"Target completato: {base_dir.name}")
 
-    # Riepilogo finale
     elapsed_total = time.time() - start_time_total
+    
     print("\n" + "="*70)
-    print("📊 RIEPILOGO BATCH")
-    print("="*70)
-    print(f"   ✅ Completati: {len(successful_targets)}")
-    for t in successful_targets: print(f"      - {t.name}")
-    print(f"\n   ❌ Falliti: {len(failed_targets)}")
-    for t in failed_targets: print(f"      - {t.name}")
-    print(f"\n   ⏱️ Tempo totale: {elapsed_total:.2f}s")
+    print("✅ ELABORAZIONE BATCH COMPLETATA")
+    print(f"⏱️ Tempo totale: {elapsed_total:.2f}s")
 
     if not successful_targets:
+        print("\n❌ Nessun target completato con successo.")
         return
 
-    # Transizione al prossimo step
+    # Chiedi di proseguire al prossimo script (Step 5: Analisi Patch)
     if ask_continue_to_next_step():
         try:
-            next_script = SCRIPTS_DIR / 'step3_analizzapatch.py'
+            next_script_name = 'Dataset_step3_analizzapatch.py'
+            next_script = SCRIPTS_DIR / next_script_name
             if next_script.exists():
-                print(f"\n🚀 Avvio Step 3 per {len(successful_targets)} target...")
                 for base_dir in successful_targets:
-                    print(f"\n--- Avvio per {base_dir.name} ---")
-                    subprocess.run([sys.executable, str(next_script), str(base_dir)])
+                    print(f"\n🚀 Avvio Step 5 ({next_script_name}) per {base_dir.name}...")
+                    subprocess.run([sys.executable, str(next_script), str(base_dir.resolve())], check=True)
             else:
-                print(f"\n⚠️  Script {next_script.name} non trovato in {SCRIPTS_DIR}")
+                print(f"⚠️  Script mancante: {next_script_name} non trovato in {SCRIPTS_DIR}")
         except Exception as e:
+            logger.error(f"Errore avvio script successivo: {e}")
             print(f"❌ Errore avvio script successivo: {e}")
 
 if __name__ == "__main__":
