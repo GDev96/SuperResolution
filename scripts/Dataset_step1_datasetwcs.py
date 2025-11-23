@@ -3,8 +3,10 @@ PIPELINE COMPLETO: CONVERSIONE WCS + REGISTRAZIONE
 Combina Step 1 (Conversione WCS) e Step 2 (Registrazione) in un unico script.
 Gli output dei due step rimangono separati e distinti.
 Tutti i metodi sono mantenuti ESATTAMENTE come negli script originali.
-MODIFICATO: Integra gestione path dinamici e menu selezione da v1.
-AGGIORNATO: Menu di avanzamento per scegliere tra i vari script Mosaico/Crop.
+MODIFICATO: 
+- Menu selezione target include opzione "0: Esegui Tutti".
+- Rimosso menu finale (ask_next_step_choice).
+- Avvio AUTOMATICO sequenziale: Mosaico Hubble -> Mosaico Osservatorio.
 """
 
 import os
@@ -38,7 +40,7 @@ LOG_DIR_ROOT = ROOT_DATA_DIR / "logs"
 SCRIPTS_DIR = CURRENT_SCRIPT_DIR
 
 print(f"📂 Project Root rilevata: {PROJECT_ROOT}")
-print(f"📂 Data Dir rilevata:    {ROOT_DATA_DIR}")
+print(f"📂 Data Dir rilevata:     {ROOT_DATA_DIR}")
 # ============================================================================
 # Prova a importare reproject
 try:
@@ -60,7 +62,7 @@ REPROJECT_ORDER = 'bilinear'
 log_lock = threading.Lock()
 
 # ============================================================================
-# FUNZIONI MENU E SELEZIONE (AGGIORNATE)
+# FUNZIONI MENU E SELEZIONE
 # ============================================================================
 
 def select_target_directory():
@@ -74,21 +76,21 @@ def select_target_directory():
         subdirs = [d for d in ROOT_DATA_DIR.iterdir() if d.is_dir() and d.name not in ['splits', 'logs']]
     except Exception as e:
         print(f"\n❌ ERRORE: Impossibile leggere la cartella {ROOT_DATA_DIR}")
-        print(f"   Dettagli: {e}")
+        print(f"   Dettagli: {e}")
         if not ROOT_DATA_DIR.exists():
-             print(f"   ⚠️ La cartella non esiste. Creala e inserisci le cartelle target (es. M33).")
+             print(f"   ⚠️ La cartella non esiste. Creala e inserisci le cartelle target (es. M33).")
         return []
 
     if not subdirs:
         print(f"\n❌ ERRORE: Nessuna sottocartella trovata in {ROOT_DATA_DIR}")
-        print("   Assicurati di avere la struttura: data/M33/1_originarie/...")
+        print("   Assicurati di avere la struttura: data/M33/1_originarie/...")
         return []
 
     print("\nCartelle target disponibili:")
-    print(f"   0: ✨ Processa TUTTI i {len(subdirs)} target")
-    print("   " + "─"*30)
+    print(f"   0: ✨ Processa TUTTI i {len(subdirs)} target")
+    print("   " + "─"*30)
     for i, dir_path in enumerate(subdirs):
-        print(f"   {i+1}: {dir_path.name}")
+        print(f"   {i+1}: {dir_path.name}")
 
     while True:
         print("\n" + "─"*70)
@@ -109,7 +111,7 @@ def select_target_directory():
             if 0 <= choice_idx < len(subdirs):
                 selected_dir = subdirs[choice_idx]
                 print(f"\n✅ Cartella selezionata: {selected_dir.name}")
-                print(f"   Percorso completo: {selected_dir}")
+                print(f"   Percorso completo: {selected_dir}")
                 return [selected_dir]
             else:
                 print(f"❌ Scelta non valida. Inserisci un numero tra 0 e {len(subdirs)}.")
@@ -119,61 +121,6 @@ def select_target_directory():
             print(f"❌ Errore: {e}")
             return []
 
-def ask_next_step_choice(successful_targets):
-    """Chiede quale script di mosaico eseguire per i target completati, con un menu migliorato."""
-    print("\n" + "⭐"*70)
-    print(f"🎯 FASE 2: REGISTRAZIONE COMPLETATA per {len(successful_targets)} target!")
-    print("⭐"*70)
-    
-    OPTIONS = [
-        ('Dataset_step2_1_0mosaicohubble.py', '🌍 Mosaico WCS Esteso (Massima Copertura)'),
-        ('Dataset_step2_1_1mosaicoosser.py', '✂️ Crop e Mosaico Uniforme (Massima Densità)'),
-        ('Dataset_step2_2_MOSAICO_MIX.py', '✨ Mosaico Avanzato (Obs su Griglia Hubble)'),
-    ]
-
-    print("\n👉 SELEZIONA LA STRATEGIA DI MOSAICO FINALE (Prossimo Step):")
-    
-    print("\n" + "─"*70)
-    print("   [1] 🌍 Mosaico WCS Esteso (Dataset_step2_1_0mosaicohubble.py)")
-    print("       Crea un grande mosaico utilizzando la risoluzione più alta per coprire l'intera estensione del campo. Ideale per la mappatura generale.")
-    print("─"*70)
-    print("   [2] ✂️ Crop e Mosaico Uniforme (Dataset_step2_1_1mosaicoosser.py)")
-    print("       Ritaglia tutte le immagini all'area di intersezione comune (minima dimensione) e crea un mosaico compatto. Veloce e garantisce densità.")
-    print("─"*70)
-    print("   [3] ✨ Mosaico Avanzato (Dataset_step2_2_MOSAICO_MIX.py)")
-    print("       Allinea direttamente l'Osservatorio sulla griglia ad alta risoluzione di Hubble, preparando i dati per il filtro di qualità finale.")
-    print("─"*70)
-    
-    print("\n   [0] 🛑 Termina qui. (I file registrati si trovano in /3_registered_native)")
-
-    while True:
-        print("\n" + "="*70)
-        try:
-            choice_str = input(f"🚀 Inserisci la tua scelta (0-3): ").strip()
-            
-            if choice_str == '0':
-                print("\n✅ Pipeline interrotta. I file registrati in /3_registered_native sono pronti per la selezione manuale dello Step 2.")
-                return None, None
-            
-            choice = int(choice_str)
-            if 1 <= choice <= len(OPTIONS):
-                next_script_name, next_script_desc = OPTIONS[choice - 1]
-                next_script_path = SCRIPTS_DIR / next_script_name
-                
-                if not next_script_path.exists():
-                    print(f"\n❌ ERRORE: Lo script selezionato '{next_script_name}' non è stato trovato nella directory degli script.")
-                    print("Si prega di verificare l'installazione e riprovare.")
-                    continue
-                
-                print(f"\n✅ Avvio: {next_script_desc}...")
-                return next_script_path, next_script_name
-            else:
-                print("❌ Scelta non valida. Inserisci un numero tra 0 e 3.")
-        except ValueError:
-            print("❌ Input non valido. Inserisci un numero.")
-            
-# Nota: La funzione `main` nello script unificato dovrà chiamare questa funzione al posto della precedente.
-# (La modifica automatica è già stata fatta nel contesto precedente).
 # ============================================================================
 # SETUP LOGGING
 # ============================================================================
@@ -1154,23 +1101,43 @@ def main():
         print("\n❌ Nessun target completato con successo. Interruzione.")
         return
 
-    # TRANSIZIONE AI PROSSIMI SCRIPT (MENU AGGIORNATO)
-    next_script_path, next_script_name = ask_next_step_choice(successful_targets)
+    # ========================================================================
+    # AUTOMAZIONE SCRIPT SUCCESSIVI (MOSAICO)
+    # ========================================================================
+    print("\n" + "⚙️ "*35)
+    print("AVVIO AUTOMATICO MOSAICI".center(70))
+    print("⚙️ "*35)
     
-    if next_script_path:
-        try:
-            print(f"\n🚀 Avvio '{next_script_name}' in loop per {len(successful_targets)} target...")
-            for BASE_DIR in successful_targets:
-                print(f"\n--- Avvio per {BASE_DIR.name} ---")
-                # Passa il path assoluto al prossimo script
-                subprocess.run([sys.executable, str(next_script_path), str(BASE_DIR.resolve())])
-                print(f"--- Completato {BASE_DIR.name} ---")
-        except Exception as e:
-            print(f"\n⚠️  Impossibile avviare automaticamente {next_script_name}: {e}")
-            print(f"   Eseguilo manualmente: python {next_script_name}")
-    else:
-        print("\n👋 Arrivederci!")
+    script_hubble = SCRIPTS_DIR / 'Dataset_step2_1_0mosaicohubble.py'
+    script_osser = SCRIPTS_DIR / 'Dataset_step2_1_1mosaicoosser.py'
+    
+    if not script_hubble.exists() or not script_osser.exists():
+        print("❌ ERRORE: Script successivi non trovati in:")
+        print(f"   - {script_hubble}")
+        print(f"   - {script_osser}")
+        return
 
+    for BASE_DIR in successful_targets:
+        print(f"\n👉 Target: {BASE_DIR.name}")
+        
+        # 1. Esegui HUBBLE
+        print(f"   🚀 [1/2] Avvio Mosaico Hubble...")
+        try:
+            subprocess.run([sys.executable, str(script_hubble), str(BASE_DIR.resolve())], check=True)
+            print("   ✅ Hubble completato.")
+        except subprocess.CalledProcessError as e:
+            print(f"   ❌ Errore in Mosaico Hubble: {e}")
+            continue # Se fallisce hubble, proviamo comunque l'osservatorio o saltiamo? Meglio provare.
+
+        # 2. Esegui SUBITO OSSERVATORIO
+        print(f"   🚀 [2/2] Avvio Mosaico Osservatorio...")
+        try:
+            subprocess.run([sys.executable, str(script_osser), str(BASE_DIR.resolve())], check=True)
+            print("   ✅ Osservatorio completato.")
+        except subprocess.CalledProcessError as e:
+            print(f"   ❌ Errore in Mosaico Osservatorio: {e}")
+
+    print("\n👋 Pipeline completata.")
 
 if __name__ == "__main__":
     start_time = time.time()
