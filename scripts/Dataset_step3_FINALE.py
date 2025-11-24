@@ -51,10 +51,10 @@ ROOT_DATA_DIR = PROJECT_ROOT / "data"
 # PARAMETRI DATASET (MASSIMIZZAZIONE DATI)
 HR_SIZE = 512         
 LR_SIZE = 80          
-STRIDE = 16           # <--- STRIDE BASSO PER MOLTE PATCH
+STRIDE = 16         # <--- STRIDE BASSO PER MOLTE PATCH
 
 # SOGLIE DI QUALITÀ
-MIN_COVERAGE = 0.95      # <--- TOLLERANZA ALTA (accetta un po' di bordo nero)
+MIN_COVERAGE = 0.97      # <--- TOLLERANZA ALTA (accetta un po' di bordo nero)
 MIN_PIXEL_VALUE = 0.0001 
 SAVE_MAP_EVERY_N = 1    # Salva un PNG ogni 20 patch per non rallentare troppo
 
