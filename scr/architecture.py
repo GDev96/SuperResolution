@@ -3,11 +3,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .env_setup import import_external_archs
 
+# Tenta l'importazione delle architetture esterne
 RRDBNet, HAT_Arch = import_external_archs()
 
 class AntiCheckerboardLayer(nn.Module):
     def __init__(self, mode='balanced'):
         super().__init__()
+        # Kernel per rimuovere artefatti a scacchiera
         if mode == 'strong':
             k, p, s = 7, 3, 1600.0
             bk = [[1,6,15,20,15,6,1],[6,36,90,120,90,36,6],[15,90,225,300,225,90,15],
@@ -27,27 +29,32 @@ class AntiCheckerboardLayer(nn.Module):
     def forward(self, x): return self.conv(x)
 
 class HybridSuperResolutionModel(nn.Module):
-    def __init__(self, target_scale=15, smoothing='balanced', device='cuda'):
+    def __init__(self, output_size=512, smoothing='balanced', device='cuda'):
         super().__init__()
-        self.target_scale = target_scale
-        self.model_scale = 2
+        self.output_size = output_size  # Dimensione target fissa (es. 512)
         
-        if RRDBNet is None: raise ImportError("BasicSR mancante.")
+        # STAGE 1: RRDBNet (BasicSR)
+        if RRDBNet is None: 
+            raise ImportError("BasicSR mancante. Verifica 'models/BasicSR'.")
+        # Input 1 canale -> Output 1 canale, Scale x2
         self.stage1 = RRDBNet(num_in_ch=1, num_out_ch=1, num_feat=64, num_block=23, num_grow_ch=32, scale=2)
         
+        # STAGE 2: HAT (Transformer)
         self.has_stage2 = False
         self.stage2 = nn.Identity()
         
         if HAT_Arch:
             try:
+                # Configurazione HAT Small/Medium per Astro
                 self.stage2 = HAT_Arch(img_size=64, patch_size=1, in_chans=1, embed_dim=180, depths=[6]*6, 
                                        num_heads=[6]*6, window_size=16, compress_ratio=3, squeeze_factor=30, 
                                        conv_scale=0.01, overlap_ratio=0.5, mlp_ratio=2., qkv_bias=True, 
                                        upscale=2, img_range=1., upsampler='pixelshuffle', resi_connection='1conv')
                 self.has_stage2 = True
-                self.model_scale = 4
-            except: pass
+            except Exception as e: 
+                print(f"⚠️ Errore inizializzazione HAT: {e}. Uso solo Stage 1.")
 
+        # Smoothing Layers (Anti-artefatti)
         if smoothing != 'none':
             self.s1 = AntiCheckerboardLayer(smoothing)
             self.s2 = AntiCheckerboardLayer(smoothing)
@@ -58,10 +65,19 @@ class HybridSuperResolutionModel(nn.Module):
         self.to(device)
 
     def forward(self, x):
-        x = self.s1(self.stage1(x))
-        if self.has_stage2: x = self.s2(self.stage2(x))
+        # Stage 1: BasicSR (Upscale x2)
+        x = self.stage1(x)
+        x = self.s1(x)
         
-        _, _, h, w = x.shape
-        th, tw = int(h * self.target_scale / self.model_scale), int(w * self.target_scale / self.model_scale)
-        x = F.interpolate(x, size=(th, tw), mode='bicubic', align_corners=False, antialias=True)
+        # Stage 2: HAT (Upscale x2 -> Totale x4) se disponibile
+        if self.has_stage2: 
+            x = self.stage2(x)
+            x = self.s2(x)
+        
+        # Upscale Finale Arbitrario (Bicubic) per raggiungere esattamente output_size
+        # Questo garantisce che l'output sia SEMPRE 512x512 (o quello che serve)
+        if x.shape[-1] != self.output_size:
+            x = F.interpolate(x, size=(self.output_size, self.output_size), 
+                              mode='bicubic', align_corners=False, antialias=True)
+        
         return self.sf(x)
