@@ -4,9 +4,9 @@ Combina Step 1 (Conversione WCS) e Step 2 (Registrazione) in un unico script.
 Gli output dei due step rimangono separati e distinti.
 Tutti i metodi sono mantenuti ESATTAMENTE come negli script originali.
 MODIFICATO: 
-- Menu selezione target include opzione "0: Esegui Tutti".
-- Rimosso menu finale (ask_next_step_choice).
-- Avvio AUTOMATICO sequenziale: Mosaico Hubble -> Mosaico Osservatorio.
+- Correzioni sintassi/indentazione (Pylance errors).
+- Rimosso Step 2.5 (Mosaico Mix).
+- Avvio AUTOMATICO sequenziale: Mosaico Hubble -> Mosaico Osservatorio -> Creazione Patch (Step 3 Finale).
 """
 
 import os
@@ -26,10 +26,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import warnings
 from pathlib import Path
+from astropy.wcs import WCS, FITSFixedWarning
 import subprocess
 
+# Ignora i warning di verifica FITS generici
 warnings.filterwarnings('ignore', category=fits.verify.VerifyWarning)
-
+# Ignora specificamente i warning di correzione date/MJD di Astropy WCS
+warnings.filterwarnings('ignore', category=FITSFixedWarning)
 # ============================================================================
 # CONFIGURAZIONE PATH DINAMICI (UNIVERSALI)
 # ============================================================================
@@ -1102,41 +1105,57 @@ def main():
         return
 
     # ========================================================================
-    # AUTOMAZIONE SCRIPT SUCCESSIVI (MOSAICO)
+    # AUTOMAZIONE SCRIPT SUCCESSIVI (MOSAICO E PATCH)
     # ========================================================================
     print("\n" + "⚙️ "*35)
-    print("AVVIO AUTOMATICO MOSAICI".center(70))
+    print("AVVIO AUTOMATICO MOSAICI E PATCHES".center(70))
     print("⚙️ "*35)
     
+    # 1. Mosaico Hubble (Step 2.1.0)
     script_hubble = SCRIPTS_DIR / 'Dataset_step2_1_0mosaicohubble.py'
+    # 2. Mosaico Osservatorio (Step 2.1.1)
     script_osser = SCRIPTS_DIR / 'Dataset_step2_1_1mosaicoosser.py'
+    # 3. Creazione Patch (Nuovo Step 3 Finale)
+    script_patch = SCRIPTS_DIR / 'Dataset_step3_FINALE.py'
     
-    if not script_hubble.exists() or not script_osser.exists():
+    if not script_hubble.exists() or not script_osser.exists() or not script_patch.exists():
         print("❌ ERRORE: Script successivi non trovati in:")
-        print(f"   - {script_hubble}")
-        print(f"   - {script_osser}")
+        print(f"   - {script_hubble.name}")
+        print(f"   - {script_osser.name}")
+        print(f"   - {script_patch.name}")
         return
 
     for BASE_DIR in successful_targets:
         print(f"\n👉 Target: {BASE_DIR.name}")
         
-        # 1. Esegui HUBBLE
-        print(f"   🚀 [1/2] Avvio Mosaico Hubble...")
+        # 1. Esegui HUBBLE (Crop e Mosaico)
+        print(f"   🚀 [1/3] Avvio Mosaico Hubble...")
         try:
             subprocess.run([sys.executable, str(script_hubble), str(BASE_DIR.resolve())], check=True)
             print("   ✅ Hubble completato.")
         except subprocess.CalledProcessError as e:
             print(f"   ❌ Errore in Mosaico Hubble: {e}")
-            continue # Se fallisce hubble, proviamo comunque l'osservatorio o saltiamo? Meglio provare.
+            continue
 
-        # 2. Esegui SUBITO OSSERVATORIO
-        print(f"   🚀 [2/2] Avvio Mosaico Osservatorio...")
+        # 2. Esegui OSSERVATORIO (Crop e Mosaico)
+        print(f"   🚀 [2/3] Avvio Mosaico Osservatorio...")
         try:
             subprocess.run([sys.executable, str(script_osser), str(BASE_DIR.resolve())], check=True)
             print("   ✅ Osservatorio completato.")
         except subprocess.CalledProcessError as e:
             print(f"   ❌ Errore in Mosaico Osservatorio: {e}")
+            continue
 
+        # 3. Esegui PATCHES (Crea Dataset)
+        print(f"   🚀 [3/3] Avvio Creazione Patch (Dataset)")
+        try:
+            # Lo Step 3 è l'unico che avvia poi lo split finale, quindi passiamo il path
+            subprocess.run([sys.executable, str(script_patch), str(BASE_DIR.resolve())], check=True)
+            print("   ✅ Creazione Patch completata.")
+        except subprocess.CalledProcessError as e:
+            print(f"   ❌ Errore in Creazione Patch: {e}")
+            continue
+        
     print("\n👋 Pipeline completata.")
 
 if __name__ == "__main__":
