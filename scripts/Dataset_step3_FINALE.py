@@ -1,14 +1,22 @@
 """
-STEP 3 (FINAL 95% FILTER): TAGLIO COPPIE + FILTRO COPERTURA + 8-PANEL VISUAL
+STEP 3 (FINAL): MULTI-PROCESS VERSION + ZIP CON NOME TARGET
 ------------------------------------------------------------------------
-Features:
-1. Scansiona i mosaici allineati (Step 2.5).
-2. FILTRO RIGOROSO: Scarta qualsiasi patch che non abbia almeno il 
-   95% di dati validi (elimina bordi neri e zone vuote).
-3. Genera la Context Card a 8 pannelli per verifica visiva.
+OTTIMIZZAZIONE:
+- Esecuzione PARALLELA su tutti i core della CPU.
+- Matplotlib backend 'Agg' per rendering thread-safe.
+- Zip automatico della cartella PNG con nome del target.
+- VISUALIZZAZIONE PULITA: 2 Mosaici Contesto + 3 Patch Dettaglio.
+- AUMENTO DATI: Stride ridotto (16px) per massimizzare le patch.
+- PROGRESS BAR: Attiva durante l'elaborazione parallela.
 
-INPUT: aligned_hubble.fits, aligned_observatory.fits, final_mosaic_observatory.fits
-OUTPUT: 6_patches_final/pair_XXXXX/
+INPUT: 
+  - final_mosaic_hubble.fits (HR Reference Grid)
+  - final_mosaic_observatory.fits (LR Input)
+  
+OUTPUT: 
+  - Dati Training: 6_patches_final/pair_XXXXX/ (FITS)
+  - Controllo Visivo: coppie_patch_png/pair_XXXXX_context.png (PNG)
+  - Archivio: coppie_patch_png_NOMETAARGET.zip
 ------------------------------------------------------------------------
 """
 
@@ -16,299 +24,358 @@ import os
 import sys
 import shutil
 import numpy as np
+import matplotlib
+# Imposta il backend non interattivo PRIMA di importare pyplot per il multiprocessing
+matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from pathlib import Path
 from astropy.io import fits
 from astropy.wcs import WCS
-from astropy.visualization import ZScaleInterval
+from astropy.visualization import PercentileInterval
 from skimage.transform import resize
-from reproject import reproject_interp
 from tqdm import tqdm
 import warnings
 import subprocess
+from scipy.ndimage import maximum_filter
+from concurrent.futures import ProcessPoolExecutor
+from reproject import reproject_interp 
 
 warnings.filterwarnings('ignore')
 
-# ================= CONFIGURAZIONE PATH PORTABILE =================
-# La radice del progetto è sempre la cartella sopra lo script (assumendo 'scripts/...')
+# ================= CONFIGURAZIONE GLOBALE =================
 CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
 ROOT_DATA_DIR = PROJECT_ROOT / "data"
-# =================================================================
 
-# ================= CONFIGURAZIONE =================
+# PARAMETRI DATASET (MASSIMIZZAZIONE DATI)
 HR_SIZE = 512         
 LR_SIZE = 80          
-STRIDE = 64           
+STRIDE = 16           # <--- STRIDE BASSO PER MOLTE PATCH
 
 # SOGLIE DI QUALITÀ
+MIN_COVERAGE = 0.95      # <--- TOLLERANZA ALTA (accetta un po' di bordo nero)
 MIN_PIXEL_VALUE = 0.0001 
-MIN_COVERAGE = 0.95      
+SAVE_MAP_EVERY_N = 1    # Salva un PNG ogni 20 patch per non rallentare troppo
 
-SAVE_MAP_EVERY_N = 5  
+# PARAMETRI VISUALIZZAZIONE STELLE
+PEAK_THRESHOLD = 0.4      
+ALIGNMENT_THRESHOLD = 0.4 
+MARKER_COLOR = 'yellow'   
+MARKER_SIZE = 50          
+# ==========================================================
 
-# --- FUNZIONI DI NORMALIZZAZIONE E PLOT (OMESSE per brevità, codice invariato) ---
-# ... (Mantieni le funzioni qui: get_global_normalization, normalize_with_limits, normalize_local, save_8panel_card) ...
+# Variabile globale per i processi worker
+shared_data = {}
 
-def get_global_normalization(data):
+# --- FUNZIONI DI UTILITY ---
+
+def get_robust_normalization(data: np.ndarray) -> tuple[float, float]:
     data = np.nan_to_num(data)
-    h, w = data.shape
-    cy, cx = h//2, w//2
-    if h > 2000 and w > 2000: sample = data[cy-1000:cy+1000, cx-1000:cx+1000]
-    else: sample = data
-    interval = ZScaleInterval()
-    vmin, vmax = interval.get_limits(sample)
+    valid_mask = data > MIN_PIXEL_VALUE
+    if np.sum(valid_mask) < 100: return 0.0, 1.0
+    valid_pixels = data[valid_mask]
+    interval = PercentileInterval(99.5)
+    vmin, vmax = interval.get_limits(valid_pixels)
+    if vmax <= vmin: return np.min(valid_pixels), np.max(valid_pixels)
     return vmin, vmax
 
-def normalize_with_limits(data, vmin, vmax):
+def normalize_with_stretch(data: np.ndarray, vmin: float, vmax: float) -> np.ndarray:
     data = np.nan_to_num(data)
-    if vmax == vmin: return np.zeros_like(data)
-    return np.clip((data - vmin) / (vmax - vmin), 0, 1)
+    if vmax <= vmin: return np.zeros_like(data)
+    clipped = np.clip((data - vmin) / (vmax - vmin), 0, 1)
+    return np.sqrt(clipped) 
 
-def normalize_local(data):
+def normalize_local_stretch(data: np.ndarray) -> np.ndarray:
     try:
-        interval = ZScaleInterval()
-        vmin, vmax = interval.get_limits(np.nan_to_num(data))
-        return np.clip((np.nan_to_num(data) - vmin) / (vmax - vmin), 0, 1)
-    except: return np.clip(np.nan_to_num(data), 0, 1)
+        data = np.nan_to_num(data)
+        interval = PercentileInterval(99.5)
+        vmin, vmax = interval.get_limits(data)
+        if vmax <= vmin: return np.zeros_like(data)
+        clipped = np.clip((data - vmin) / (vmax - vmin), 0, 1)
+        return np.sqrt(clipped)
+    except:
+        return np.zeros_like(data)
 
-def save_8panel_card(mosaic_h, mosaic_o_aligned, mosaic_o_visual, mosaic_o_raw, 
-                     patch_h, patch_o_in, x, y, wcs_h, wcs_orig, 
+def find_aligned_stars(patch_h: np.ndarray, patch_o_in: np.ndarray) -> tuple:
+    tar_n = normalize_local_stretch(patch_h)
+    inp_s = resize(normalize_local_stretch(patch_o_in), (HR_SIZE, HR_SIZE), order=0)
+    overlap_intensity = np.minimum(inp_s, tar_n)
+    footprint = np.ones((3, 3))
+    local_max = maximum_filter(tar_n, footprint=footprint)
+    is_peak = (tar_n == local_max) & (tar_n > PEAK_THRESHOLD * tar_n.max())
+    aligned_mask = is_peak & (overlap_intensity > ALIGNMENT_THRESHOLD)
+    y, x = np.where(aligned_mask)
+    return x, y
+
+# ==================================================================================
+# FUNZIONE DI VISUALIZZAZIONE AGGIORNATA (Pulita: Solo Config e Stats)
+# ==================================================================================
+def save_8panel_card(mosaic_h, mosaic_o_raw, 
+                     patch_h, patch_o_in, 
+                     x, y, wcs_h, wcs_o_raw,
                      vmin_h, vmax_h, vmin_o, vmax_o, save_path):
     
-    fig = plt.figure(figsize=(28, 12))
-    fig.suptitle(f"DATASET SAMPLE: X={x} Y={y} (Coverage > 95%)", fontsize=22, fontweight='bold')
-    gs = fig.add_gridspec(2, 4) 
-    sc = 8 
+    fig = plt.figure(figsize=(24, 12)) 
+    coverage_perc = np.count_nonzero(patch_h > MIN_PIXEL_VALUE) / (HR_SIZE * HR_SIZE) * 100
+    x_stars, y_stars = find_aligned_stars(patch_h, patch_o_in)
+    
+    # Griglia 2x4.
+    gs = fig.add_gridspec(2, 4)
+    sc = 10 
+    
+    target_name = save_path.parent.parent.parent.name if save_path.parent.parent.parent.name else "N/A"
+    fig.suptitle(f"DATASET SAMPLE: Target {target_name} | X={x} Y={y} | Coverage: {coverage_perc:.1f}%", 
+                 fontsize=18, fontweight='bold')
 
-    # 1. Hubble
-    ax1 = fig.add_subplot(gs[0, 0])
-    ax1.imshow(normalize_with_limits(mosaic_h[::sc, ::sc], vmin_h, vmax_h), origin='lower', cmap='gray')
-    ax1.set_title("1. Hubble Master", color='green')
-    ax1.add_patch(patches.Rectangle((x/sc, y/sc), HR_SIZE/sc, HR_SIZE/sc, lw=2, edgecolor='lime', facecolor='none'))
-    ax1.axis('off')
+    def plot_mosaic_context(ax, data, title, box_col, v_min, v_max, wcs_curr, wcs_h):
+        display_data = data[::sc, ::sc]
+        ax.imshow(normalize_with_stretch(display_data, v_min, v_max), origin='lower', cmap='gray')
+        ax.set_title(title, color='black', fontsize=12)
+        ax.axis('off')
+        
+        try:
+            corners_pix_h = np.array([[x, y], [x+HR_SIZE, y], [x+HR_SIZE, y+HR_SIZE], [x, y+HR_SIZE]])
+            corners_world = wcs_h.pixel_to_world(corners_pix_h[:,0], corners_pix_h[:,1])
+            px_curr = wcs_curr.world_to_pixel(corners_world)
+            poly_coords = np.column_stack((px_curr[0]/sc, px_curr[1]/sc))
+            rect = patches.Polygon(poly_coords, linewidth=2, edgecolor=box_col, facecolor='none')
+            ax.add_patch(rect)
+        except: pass
 
-    # 2. Obs Aligned
-    ax2 = fig.add_subplot(gs[0, 1])
-    ax2.imshow(normalize_with_limits(mosaic_o_aligned[::sc, ::sc], vmin_o, vmax_o), origin='lower', cmap='magma')
-    ax2.set_title("2. Obs Allineato", color='magenta')
-    ax2.add_patch(patches.Rectangle((x/sc, y/sc), HR_SIZE/sc, HR_SIZE/sc, lw=2, edgecolor='cyan', facecolor='none'))
-    ax2.axis('off')
-
-    # 3. Obs Rotated Visual
-    ax3 = fig.add_subplot(gs[0, 2])
-    ax3.imshow(normalize_with_limits(mosaic_o_visual[::sc, ::sc], vmin_o, vmax_o), origin='lower', cmap='gray')
-    ax3.set_title("3. Obs Ruotato (Solo Visual)", color='orange')
-    ax3.add_patch(patches.Rectangle((x/sc, y/sc), HR_SIZE/sc, HR_SIZE/sc, lw=2, edgecolor='orange', facecolor='none'))
-    ax3.axis('off')
-
-    # 4. Obs Native
-    ax4 = fig.add_subplot(gs[0, 3])
-    ax4.imshow(normalize_with_limits(mosaic_o_raw[::sc, ::sc], vmin_o, vmax_o), origin='lower', cmap='gray')
-    ax4.set_title("4. Obs Originale (Nativo)", color='white')
-    # Calcolo box distorto
-    corners_pix = np.array([[x, y], [x+HR_SIZE, y+HR_SIZE]])
-    corners_world = wcs_h.pixel_to_world(corners_pix[:,0], corners_pix[:,1])
-    cx_orig, cy_orig = wcs_orig.world_to_pixel(corners_world)
-    ox, oy = min(cx_orig), min(cy_orig)
-    ow, oh = abs(cx_orig[1]-cx_orig[0]), abs(cy_orig[1]-cy_orig[0])
-    ax4.add_patch(patches.Rectangle((ox/sc, oy/sc), ow/sc, oh/sc, lw=2, edgecolor='red', facecolor='none'))
-    ax4.axis('off')
-
-    # 5. Patch H
+    ### RIGA 1: MOSAICI CENTRATI ###
+    plot_mosaic_context(fig.add_subplot(gs[0, 1]), mosaic_h, "**1. Hubble Master (HR)**", 'lime', vmin_h, vmax_h, wcs_h, wcs_h)
+    plot_mosaic_context(fig.add_subplot(gs[0, 2]), mosaic_o_raw, "**2. Obs Master (LR, Raw WCS)**", 'cyan', vmin_o, vmax_o, wcs_o_raw, wcs_h)
+    
+    ### RIGA 2: PATCH (Dettaglio Training) ###
     ax5 = fig.add_subplot(gs[1, 0])
-    ax5.imshow(normalize_local(patch_h), origin='lower', cmap='viridis')
-    ax5.set_title("5. Hubble Target")
+    ax5.imshow(normalize_local_stretch(patch_h), origin='lower', cmap='gray')
+    ax5.scatter(x_stars, y_stars, s=MARKER_SIZE, facecolors='none', edgecolors=MARKER_COLOR, marker='o', linewidths=1.5, alpha=0.9)
+    ax5.set_title("**3. Hubble Target (HR) / Ground Truth**", color='black')
     ax5.axis('off')
 
-    # 6. Patch O
+    x_stars_lr = x_stars * (LR_SIZE / HR_SIZE)
+    y_stars_lr = y_stars * (LR_SIZE / HR_SIZE)
     ax6 = fig.add_subplot(gs[1, 1])
-    ax6.imshow(normalize_local(patch_o_in), origin='lower', cmap='magma')
-    ax6.set_title("6. Obs Input")
+    ax6.imshow(normalize_local_stretch(patch_o_in), origin='lower', cmap='gray')
+    ax6.scatter(x_stars_lr, y_stars_lr, s=MARKER_SIZE, facecolors='none', edgecolors=MARKER_COLOR, marker='o', linewidths=1.5, alpha=0.9)
+    ax6.set_title("**4. Obs Input (LR) / Aligned**", color='black')
     ax6.axis('off')
 
-    # 7. Overlay
     ax7 = fig.add_subplot(gs[1, 2])
-    inp_s = resize(normalize_local(patch_o_in), (HR_SIZE, HR_SIZE), order=0)
-    tar_n = normalize_local(patch_h)
+    inp_s = resize(normalize_local_stretch(patch_o_in), (HR_SIZE, HR_SIZE), order=0)
+    tar_n = normalize_local_stretch(patch_h)
     rgb = np.zeros((HR_SIZE, HR_SIZE, 3))
-    rgb[..., 0] = inp_s * 0.8
-    rgb[..., 1] = tar_n
-    rgb[..., 2] = inp_s * 0.8
+    rgb[..., 0] = inp_s * 0.9 
+    rgb[..., 1] = tar_n * 0.9 
     ax7.imshow(rgb, origin='lower')
-    ax7.set_title("7. Check Overlay")
+    ax7.scatter(x_stars, y_stars, s=MARKER_SIZE, facecolors='none', edgecolors=MARKER_COLOR, marker='o', linewidths=1.5, alpha=0.9)
+    ax7.set_title("**5. RGB Overlay (LR vs HR)**", color='black')
     ax7.axis('off')
 
-    # 8. Info
     ax8 = fig.add_subplot(gs[1, 3])
     ax8.axis('off')
-    txt = f"COPERTURA OK (>95%)\nValid H: {np.count_nonzero(patch_h > MIN_PIXEL_VALUE)/(HR_SIZE**2)*100:.1f}%"
-    ax8.text(0.1, 0.5, txt, fontsize=14, family='monospace')
+    txt = (f"CONFIG PATCH:\n"
+           f"- HR Size: {HR_SIZE}x{HR_SIZE}\n"
+           f"- LR Size: {LR_SIZE}x{LR_SIZE}\n"
+           f"- Stride:  {STRIDE}\n\n"
+           f"STATISTICHE:\n"
+           f"- Copertura Pixel (>0): {coverage_perc:.2f}%\n"
+           f"- Stelle Allineate: {len(x_stars)}")
+    ax8.text(0.1, 0.5, txt, fontsize=14, family='monospace', verticalalignment='center')
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=90)
     plt.close(fig)
 
+# --- WORKER SETUP & JOB ---
 
-def create_dataset_filtered(base_dir):
-    base_dir = Path(base_dir) # Assicura che sia un Path object
+def init_worker(d_h, d_o_raw, hdr_h, w_h, w_o_raw, v_h, V_h, v_o, V_o, out_fits, out_png):
+    shared_data['h'] = d_h
+    shared_data['o_raw'] = d_o_raw
+    shared_data['header_h'] = hdr_h
+    shared_data['wcs_h'] = w_h
+    shared_data['wcs_o_raw'] = w_o_raw
+    shared_data['vmin_h'] = v_h
+    shared_data['vmax_h'] = V_h
+    shared_data['vmin_o'] = v_o
+    shared_data['vmax_o'] = V_o
+    shared_data['out_fits'] = out_fits
+    shared_data['out_png'] = out_png
+
+def create_lr_wcs(hr_wcs, hr_shape, lr_shape):
+    scale_factor = hr_shape[0] / lr_shape[0]
+    lr_wcs = hr_wcs.deepcopy()
+    lr_wcs.wcs.cdelt[0] *= scale_factor 
+    lr_wcs.wcs.cdelt[1] *= scale_factor
+    lr_wcs.wcs.crpix[0] /= scale_factor
+    lr_wcs.wcs.crpix[1] /= scale_factor
+    return lr_wcs
+
+def process_single_patch(args):
+    y, x, idx = args
+    data_h = shared_data['h']
+    data_o_raw = shared_data['o_raw']
+    wcs_h = shared_data['wcs_h']
+    wcs_o_raw = shared_data['wcs_o_raw']
     
-    aligned_dir = base_dir / '5_mosaics' / 'aligned_ready_for_crop'
+    # 1. Check rapido copertura (prima della riproiezione costosa)
+    patch_h = data_h[y:y+HR_SIZE, x:x+HR_SIZE]
+    valid_px = np.count_nonzero(patch_h > MIN_PIXEL_VALUE)
+    if (valid_px / patch_h.size) < MIN_COVERAGE:
+        return False 
+    
+    # 2. Riproiezione
+    hr_patch_wcs = wcs_h.deepcopy()
+    hr_patch_wcs.wcs.crpix = hr_patch_wcs.wcs.crpix - np.array([x, y])
+    lr_target_wcs = create_lr_wcs(hr_patch_wcs, (HR_SIZE, HR_SIZE), (LR_SIZE, LR_SIZE))
+    
+    try:
+        patch_o_lr, _ = reproject_interp(
+            (data_o_raw, wcs_o_raw),
+            lr_target_wcs,
+            shape_out=(LR_SIZE, LR_SIZE),
+            order='bilinear'
+        )
+        patch_o_lr = np.nan_to_num(patch_o_lr).astype(np.float32)
+    except Exception as e:
+        return False
+    
+    # 3. Salvataggio
+    pair_path = shared_data['out_fits'] / f"pair_{idx:05d}"
+    pair_path.mkdir(exist_ok=True)
+    
+    header_h = shared_data['header_h']
+    h_hr = hr_patch_wcs.to_header()
+    fits.PrimaryHDU(patch_h.astype(np.float32), header=h_hr).writeto(pair_path/"hubble.fits", overwrite=True)
+    h_lr = lr_target_wcs.to_header()
+    fits.PrimaryHDU(patch_o_lr, header=h_lr).writeto(pair_path/"observatory.fits", overwrite=True)
+    
+    if idx % SAVE_MAP_EVERY_N == 0:
+        save_path = shared_data['out_png'] / f"pair_{idx:05d}_context.png"
+        save_8panel_card(
+            data_h, shared_data['o_raw'],
+            patch_h, patch_o_lr,
+            x, y, shared_data['wcs_h'], shared_data['wcs_o_raw'],
+            shared_data['vmin_h'], shared_data['vmax_h'], shared_data['vmin_o'], shared_data['vmax_o'],
+            save_path
+        )
+    
+    return True
+
+# ================= MAIN PROCESSING =================
+
+def create_dataset_filtered(base_dir: Path) -> tuple[bool, Path] | None:
+    
     mosaics_dir = base_dir / '5_mosaics'
-    output_dir = base_dir / '6_patches_final'
+    output_fits_dir = base_dir / '6_patches_final'      
+    output_png_dir = base_dir / 'coppie_patch_png'      
     
-    f_h_align = aligned_dir / 'aligned_hubble.fits'
-    f_o_align = aligned_dir / 'aligned_observatory.fits'
-    f_o_orig  = mosaics_dir / 'final_mosaic_observatory.fits'
+    f_h_raw   = mosaics_dir / 'final_mosaic_hubble.fits'
+    f_o_raw   = mosaics_dir / 'final_mosaic_observatory.fits'
 
-    if not f_h_align.exists() or not f_o_align.exists() or not f_o_orig.exists():
-        print(f"❌ Mancano file necessari per {base_dir.name}.")
-        return
+    missing = [f.name for f in [f_h_raw, f_o_raw] if not f.exists()]
+    if missing:
+        print(f"\n❌ ERRORE: Mancano i file: {missing}")
+        return None
 
-    if output_dir.exists(): shutil.rmtree(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if output_fits_dir.exists(): shutil.rmtree(output_fits_dir)
+    output_fits_dir.mkdir(parents=True, exist_ok=True)
+    if output_png_dir.exists(): shutil.rmtree(output_png_dir)
+    output_png_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\n⚙️  Caricamento Dati...")
-    with fits.open(f_h_align) as h:
-        data_h = np.nan_to_num(h[0].data)
-        if data_h.ndim==3: data_h=data_h[0]
-        wcs_h = WCS(h[0].header)
-        header_h = h[0].header
+    print(f"\n⚙️  Caricamento Dati Main Process...")
+    try:
+        def load_fits(p):
+            with fits.open(p) as h:
+                d = np.nan_to_num(h[0].data)
+                if d.ndim > 2: d = d[0]
+                return d, WCS(h[0].header), h[0].header
 
-    with fits.open(f_o_align) as h:
-        data_o_aligned = np.nan_to_num(h[0].data)
-        if data_o_aligned.ndim==3: data_o_aligned=data_o_aligned[0]
+        data_h, wcs_h, header_h = load_fits(f_h_raw)
+        data_o_raw, wcs_o_raw, _ = load_fits(f_o_raw)
+        
+    except Exception as e:
+        print(f"❌ Errore caricamento FITS: {e}")
+        return None
 
-    with fits.open(f_o_orig) as h:
-        data_o_raw = np.nan_to_num(h[0].data)
-        if data_o_raw.ndim==3: data_o_raw=data_o_raw[0]
-        wcs_orig = WCS(h[0].header)
-
-    print("⚖️  Calcolo Contrasto...")
-    vmin_h, vmax_h = get_global_normalization(data_h)
-    vmin_o, vmax_o = get_global_normalization(data_o_raw)
-
-    print("🔄 Generazione Mappa Ruotata Visuale...")
-    visual_rotated, _ = reproject_interp((data_o_raw, wcs_orig), wcs_h, shape_out=data_h.shape)
-    visual_rotated = np.nan_to_num(visual_rotated)
+    print("⚖️  Calcolo livelli di normalizzazione...")
+    vmin_h, vmax_h = get_robust_normalization(data_h)
+    vmin_o, vmax_o = get_robust_normalization(data_o_raw)
 
     h_dim, w_dim = data_h.shape
     y_list = list(range(0, h_dim - HR_SIZE + 1, STRIDE))
     x_list = list(range(0, w_dim - HR_SIZE + 1, STRIDE))
-    total = len(y_list) * len(x_list)
-    count = 0
-    skipped = 0
     
-    print(f"\n✂️  Estrazione con Filtro {MIN_COVERAGE*100}%...")
-    with tqdm(total=total, desc="Processing", unit="patch") as pbar:
-        for y in y_list:
-            for x in x_list:
-                patch_h = data_h[y:y+HR_SIZE, x:x+HR_SIZE]
-                patch_o_dat = data_o_aligned[y:y+HR_SIZE, x:x+HR_SIZE]
-                
-                # ==================================================
-                # 🔥 NUOVO FILTRO DI COPERTURA
-                # ==================================================
-                # Conta quanti pixel NON sono zero/neri
-                valid_pixels_h = np.count_nonzero(patch_h > MIN_PIXEL_VALUE)
-                total_pixels = HR_SIZE * HR_SIZE
-                coverage = valid_pixels_h / total_pixels
-                
-                # Se la copertura è inferiore al 95%, SCARTA
-                if coverage < MIN_COVERAGE:
-                    skipped += 1
-                    pbar.update(1)
-                    continue
-                # ==================================================
+    tasks = []
+    task_id = 0
+    # Calcolo preliminare dei task (veloce)
+    for y in y_list:
+        for x in x_list:
+            tasks.append((y, x, task_id))
+            task_id += 1
+            
+    print(f"\n🚀 Avvio Processing Parallelo (Stride={STRIDE}) su {os.cpu_count()} core...")
+    print(f"   Totale Patch Candidate da analizzare: {len(tasks)}")
+    print("   (La barra di avanzamento partirà ora...)")
 
-                patch_o_in = resize(patch_o_dat, (LR_SIZE, LR_SIZE), 
-                                  anti_aliasing=True, preserve_range=True).astype(np.float32)
+    processed_count = 0
+    
+    # ESECUZIONE PARALLELA CON BARRA DI AVANZAMENTO
+    with ProcessPoolExecutor(max_workers=os.cpu_count(), 
+                             initializer=init_worker, 
+                             initargs=(data_h, data_o_raw, 
+                                       header_h, wcs_h, wcs_o_raw, 
+                                       vmin_h, vmax_h, vmin_o, vmax_o, 
+                                       output_fits_dir, output_png_dir)) as executor:
+        
+        # tqdm avvolge l'iteratore dei risultati
+        results = list(tqdm(executor.map(process_single_patch, tasks), 
+                            total=len(tasks), 
+                            unit="patch",
+                            desc="Elaborazione",
+                            ncols=100))
+        processed_count = sum(results)
 
-                pair_dir = output_dir / f"pair_{count:05d}"
-                pair_dir.mkdir(exist_ok=True)
-                
-                fits.PrimaryHDU(data=patch_h, header=header_h).writeto(pair_dir/"hubble.fits", overwrite=True)
-                h_lr = header_h.copy()
-                h_lr['NAXIS1'], h_lr['NAXIS2'] = LR_SIZE, LR_SIZE
-                fits.PrimaryHDU(data=patch_o_in, header=h_lr).writeto(pair_dir/"observatory.fits", overwrite=True)
-                
-                if count % SAVE_MAP_EVERY_N == 0:
-                    save_8panel_card(
-                        mosaic_h=data_h, mosaic_o_aligned=data_o_aligned,
-                        mosaic_o_visual=visual_rotated, mosaic_o_raw=data_o_raw,
-                        patch_h=patch_h, patch_o_in=patch_o_in,
-                        x=x, y=y, wcs_h=wcs_h, wcs_orig=wcs_orig,
-                        vmin_h=vmin_h, vmax_h=vmax_h, vmin_o=vmin_o, vmax_o=vmax_o,
-                        save_path=pair_dir/"context_card.png"
-                    )
-                
-                count += 1
-                pbar.update(1)
-                
-    print("\n✅ Finito.")
-    print(f"   Patch Valide: {count}")
-    print(f"   Patch Scartate (Bordi/Vuote): {skipped}")
+    # === ZIP AUTOMATICO PNG CON NOME TARGET ===
+    target_name = base_dir.name
+    zip_filename = f"coppie_patch_png_{target_name}"
+    
+    print(f"\n📦 Creazione archivio ZIP '{zip_filename}.zip'...")
+    zip_path = base_dir / zip_filename
+    shutil.make_archive(str(zip_path), 'zip', output_png_dir)
+    
+    # ================= RIEPILOGO FINALE =================
+    print("\n" + "="*50)
+    print(f"✅ COMPLETATO! REPORT FINALE PER: {target_name}")
+    print("="*50)
+    print(f"🔢 STRIDE UTILIZZATO: {STRIDE} px")
+    print(f"🖼️  COPPIE GENERATE:  {processed_count}")
+    print("="*50)
+    print(f"📂 Dataset: {output_fits_dir}")
+    print(f"🗜️  Zip PNG: {zip_path}.zip")
     
     return True, base_dir
 
-def select_target_directory_manual():
-    print("\n" + "📂"*35)
-    print("SELEZIONE CARTELLA TARGET (Filtro 95%)".center(70))
-    print("📂"*35)
-    subdirs = [d for d in ROOT_DATA_DIR.iterdir() if d.is_dir() and d.name not in ['splits', 'logs', '__pycache__']]
+def select_target_directory():
+    subdirs = [d for d in ROOT_DATA_DIR.iterdir() if d.is_dir() and d.name not in ['splits', 'logs']]
     if not subdirs: return None
-    for i, d in enumerate(subdirs):
-        print(f"   {i+1}: {d.name}")
+    print("\nSELEZIONA TARGET:")
+    for i, d in enumerate(subdirs): print(f" {i+1}: {d.name}")
     try:
-        choice = int(input(f"\n👉 Seleziona (1-{len(subdirs)}): ").strip())
-        if 0 < choice <= len(subdirs): return subdirs[choice-1]
-    except: pass
-    return None
+        idx = int(input("Scelta: ")) - 1
+        return subdirs[idx] if 0 <= idx < len(subdirs) else None
+    except: return None
 
-def ask_continue_to_split(base_dir):
-    """Chiede se proseguire con lo Step 4 (Split)."""
-    next_script_name = 'Modello_2_pre_da_usopatch_dataset_step3.py' # Lo script di split che hai fornito
-    
-    print("\n" + "="*70)
-    print("🎯 TAGLIO PATCH COMPLETATO!")
-    print("="*70)
-    print(f"\n📋 Vuoi eseguire lo Step 4 (Split Train/Val/Test) ora?")
-    print(f"   Avvierà: **{next_script_name}**")
-    
-    while True:
-        print("\n" + "─"*70)
-        choice = input(f"👉 Continua con lo Split? [S/n, default=S]: ").strip().lower()
-        if choice in ('', 's', 'si', 'y', 'yes'):
-            return True
-        elif choice in ('n', 'no'):
-            return False
-        else:
-            print("❌ Scelta non valida.")
+def ask_continue(base_dir):
+    next_script = CURRENT_SCRIPT_DIR / 'Modello_2_pre_da_usopatch_dataset_step3.py'
+    print(f"\nVuoi lanciare lo split dataset? (Script: {next_script.name})")
+    if input("S/n: ").lower() in ['s', '', 'y']:
+        subprocess.run([sys.executable, str(next_script.resolve()), str(base_dir.resolve())])
 
 if __name__ == "__main__":
-    
-    # 1. Trova il target: 
-    # Se chiamato da subprocess (con argomento), usa l'argomento.
-    # Altrimenti, mostra il menu manuale.
-    if len(sys.argv) > 1:
-        target = Path(sys.argv[1])
-    else:
-        target = select_target_directory_manual()
-    
+    target = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else select_target_directory()
     if target:
-        success, base_dir = create_dataset_filtered(target)
-        
-        if success and ask_continue_to_split(base_dir):
-            try:
-                split_script_name = 'Modello_2_pre_da_usopatch_dataset_step3.py'
-                next_script = CURRENT_SCRIPT_DIR / split_script_name
-                
-                if next_script.exists():
-                    # Passa il percorso assoluto della cartella base per la portabilità
-                    print(f"\n🚀 Avvio Split per {base_dir.name}...")
-                    subprocess.run([sys.executable, str(next_script), str(base_dir)], check=True)
-                else:
-                    print(f"\n⚠️  Script {next_script.name} non trovato in {CURRENT_SCRIPT_DIR}")
-            except Exception as e:
-                print(f"❌ Errore avvio script di split: {e}")
+        res = create_dataset_filtered(target)
+        if res:
+            ask_continue(res[1])
