@@ -1,12 +1,7 @@
 """
 PIPELINE COMPLETO: CONVERSIONE WCS + REGISTRAZIONE
 Combina Step 1 (Conversione WCS) e Step 2 (Registrazione) in un unico script.
-Gli output dei due step rimangono separati e distinti.
-Tutti i metodi sono mantenuti ESATTAMENTE come negli script originali.
-MODIFICATO: 
-- Correzioni sintassi/indentazione (Pylance errors).
-- Rimosso Step 2.5 (Mosaico Mix).
-- Avvio AUTOMATICO sequenziale: Mosaico Hubble -> Mosaico Osservatorio -> Creazione Patch (Step 3 Finale).
+MODIFICATO: Supporto per estensioni maiuscole (.FIT, .FITS)
 """
 
 import os
@@ -386,11 +381,18 @@ def extract_lith_data(filename, logger):
 
 def process_osservatorio_folder(input_dir, output_dir, logger):
     """Processa osservatorio convertendo coordinate in WCS."""
-    # Modificato per cercare ricorsivamente in tutte le sottocartelle
-    fits_files = list(Path(input_dir).glob('**/*.fit')) + list(Path(input_dir).glob('**/*.fits'))
+    
+    # MODIFICATO: Include anche .FIT e .FITS (maiuscole)
+    fits_files = list(Path(input_dir).glob('**/*.fit')) + \
+                 list(Path(input_dir).glob('**/*.fits')) + \
+                 list(Path(input_dir).glob('**/*.FIT')) + \
+                 list(Path(input_dir).glob('**/*.FITS'))
+    
+    # Rimuovi duplicati (se presenti)
+    fits_files = sorted(list(set(fits_files)))
     
     if not fits_files:
-        logger.warning(f"Nessun file in {input_dir}")
+        logger.warning(f"Nessun file trovato in {input_dir}. Verifica estensioni (.fit, .fits, .FIT).")
         return 0, 0, None
     
     logger.info(f"Trovati {len(fits_files)} file osservatorio")
@@ -446,8 +448,14 @@ def process_osservatorio_folder(input_dir, output_dir, logger):
 
 def process_lith_folder(input_dir, output_dir, logger):
     """Processa LITH/HST."""
-    # Modificato per cercare ricorsivamente in tutte le sottocartelle
-    fits_files = list(Path(input_dir).glob('**/*.fit')) + list(Path(input_dir).glob('**/*.fits'))
+    # MODIFICATO: Include anche .FIT e .FITS (maiuscole)
+    fits_files = list(Path(input_dir).glob('**/*.fit')) + \
+                 list(Path(input_dir).glob('**/*.fits')) + \
+                 list(Path(input_dir).glob('**/*.FIT')) + \
+                 list(Path(input_dir).glob('**/*.FITS'))
+    
+    # Rimuovi duplicati
+    fits_files = sorted(list(set(fits_files)))
     
     if not fits_files:
         return 0, 0, None
@@ -568,9 +576,11 @@ def extract_wcs_info(filepath, logger):
 
 def analyze_images(input_dir, source_name, logger):
     """Analizza tutte le immagini in una directory."""
-    # Cerca tutti i file FITS, inclusi quelli con _wcs.fits dallo Step 1
+    # MODIFICATO: Supporto per maiuscole anche nello Step 2
     files = list(Path(input_dir).glob('*.fits')) + \
             list(Path(input_dir).glob('*.fit')) + \
+            list(Path(input_dir).glob('*.FITS')) + \
+            list(Path(input_dir).glob('*.FIT')) + \
             list(Path(input_dir).glob('*_wcs.fits'))
     
     # Rimuovi duplicati (alcuni file potrebbero essere trovati due volte)
