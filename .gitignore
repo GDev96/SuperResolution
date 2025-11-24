@@ -1,3 +1,4 @@
+# === AMBIENTE PYTHON ===
 venv/
 __pycache__/
 *.pyc
@@ -6,6 +7,24 @@ __pycache__/
 .ipynb_checkpoints
 .DS_Store
 *.log
+
+# === DATI ELABORATI (Auto-generati) ===
 data/
-data/results/
+
+# === LOGS E OUTPUT ===
 logs/
+temp_*/
+outputs/
+
+# === MODELLI E PESI (FILE GRANDI) ===
+models/
+weights/
+*.onnx
+*.pth
+*.pt
+*.h5
+
+# === FILE TEMPORANEI ===
+*.tmp
+*.bak
+*~
