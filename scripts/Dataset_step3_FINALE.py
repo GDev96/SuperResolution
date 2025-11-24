@@ -5,7 +5,8 @@ OTTIMIZZAZIONE:
 - Esecuzione PARALLELA su tutti i core della CPU.
 - Matplotlib backend 'Agg' per rendering thread-safe.
 - Zip automatico della cartella PNG con nome del target.
-- VISUALIZZAZIONE AGGIORNATA: 2 Mosaici Contesto + 3 Patch Dettaglio.
+- VISUALIZZAZIONE PULITA: 2 Mosaici Contesto + 3 Patch Dettaglio.
+- AUMENTO DATI: Stride ridotto per massimizzare le patch.
 
 INPUT: 
   - final_mosaic_hubble.fits (HR Reference Grid)
@@ -37,26 +38,24 @@ import warnings
 import subprocess
 from scipy.ndimage import maximum_filter
 from concurrent.futures import ProcessPoolExecutor
-import functools
 from reproject import reproject_interp 
 
 warnings.filterwarnings('ignore')
-
-MIN_COVERAGE = 0.97      # Scarta se meno del 97% di dati validi
 
 # ================= CONFIGURAZIONE GLOBALE =================
 CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
 ROOT_DATA_DIR = PROJECT_ROOT / "data"
 
-# PARAMETRI DATASET
+# PARAMETRI DATASET (MODIFICATI PER AUMENTARE I DATI)
 HR_SIZE = 512         
 LR_SIZE = 80          
-STRIDE = 64           
+STRIDE = 16           # <--- RIDOTTO A 16 (Era 64) per generare più coppie!
 
 # SOGLIE DI QUALITÀ
+MIN_COVERAGE = 0.95      # <--- RIDOTTO A 0.85 (Era 0.97) per accettare più bordi
 MIN_PIXEL_VALUE = 0.0001 
-SAVE_MAP_EVERY_N = 1     
+SAVE_MAP_EVERY_N = 10    # Salva un PNG ogni 10 patch per non rallentare troppo (visto che ora ne farà tante)
 
 # PARAMETRI VISUALIZZAZIONE STELLE
 PEAK_THRESHOLD = 0.4      
@@ -110,7 +109,7 @@ def find_aligned_stars(patch_h: np.ndarray, patch_o_in: np.ndarray) -> tuple:
     return x, y
 
 # ==================================================================================
-# FUNZIONE DI VISUALIZZAZIONE AGGIORNATA (Mosaici Centrati, Info Combinate)
+# FUNZIONE DI VISUALIZZAZIONE AGGIORNATA (Pulita: Solo Config e Stats)
 # ==================================================================================
 def save_8panel_card(mosaic_h, mosaic_o_raw, 
                      patch_h, patch_o_in, 
@@ -158,7 +157,6 @@ def save_8panel_card(mosaic_h, mosaic_o_raw,
     
     # Le posizioni gs[0, 0] e gs[0, 3] rimangono vuote per centrare i plot.
 
-
     ### RIGA 2: PATCH (Dettaglio Training) ###
 
     # C. Hubble Target Patch (HR) - Posizione [1, 0]
@@ -189,29 +187,26 @@ def save_8panel_card(mosaic_h, mosaic_o_raw,
     ax7.set_title("**5. RGB Overlay (LR vs HR)**", color='black')
     ax7.axis('off')
 
-    # F. Statistiche e Info Combinate - Posizione [1, 3]
+    # F. Statistiche e Info Essenziali - Posizione [1, 3]
     ax8 = fig.add_subplot(gs[1, 3])
     ax8.axis('off')
+    
+    # Testo semplificato
     txt = (f"CONFIG PATCH:\n"
            f"- HR Size: {HR_SIZE}x{HR_SIZE}\n"
            f"- LR Size: {LR_SIZE}x{LR_SIZE}\n"
            f"- Stride:  {STRIDE}\n\n"
-           f"NORM RANGES (99.5%):\n"
-           f"- Hubble: [{vmin_h:.4f}, {vmax_h:.4f}]\n"
-           f"- Obs:    [{vmin_o:.4f}, {vmax_o:.4f}]\n\n"
            f"STATISTICHE:\n"
            f"- Copertura Pixel (>0): {coverage_perc:.2f}%\n"
-           f"- Stelle Allineate: {len(x_stars)}\n\n"
-           f"NOTE: Panel 4 è la riproiezione\n"
-           f"di {LR_SIZE}x{LR_SIZE}px dal mosaico Obs\n"
-           f"sul WCS della patch HR.")
-    # Font leggermente ridotto per far stare tutto
-    ax8.text(0.1, 0.5, txt, fontsize=11, family='monospace', verticalalignment='center')
+           f"- Stelle Allineate: {len(x_stars)}")
+           
+    # Font leggermente più grande per riempire meglio lo spazio
+    ax8.text(0.1, 0.5, txt, fontsize=14, family='monospace', verticalalignment='center')
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=90)
     plt.close(fig)
-# ==================================================================================
+
 # --- WORKER SETUP & JOB ---
 
 def init_worker(d_h, d_o_raw, hdr_h, w_h, w_o_raw, v_h, V_h, v_o, V_o, out_fits, out_png):
@@ -230,22 +225,15 @@ def init_worker(d_h, d_o_raw, hdr_h, w_h, w_o_raw, v_h, V_h, v_o, V_o, out_fits,
 
 def create_lr_wcs(hr_wcs, hr_shape, lr_shape):
     """Crea un WCS a bassa risoluzione (LR) allineato alla patch HR."""
-    # La risoluzione HR è hr_wcs.wcs.cdelt. L'upscale è hr_shape/lr_shape
     scale_factor = hr_shape[0] / lr_shape[0] # Assumiamo quadrato
-    
     lr_wcs = hr_wcs.deepcopy()
-    
     # La risoluzione di un pixel LR è 'scale_factor' volte quella HR
-    # Nota: cdelt[0] è negativo per RA
     lr_wcs.wcs.cdelt[0] *= scale_factor 
     lr_wcs.wcs.cdelt[1] *= scale_factor
-    
     # Il centro di riferimento (CRPIX) deve essere scalato
     lr_wcs.wcs.crpix[0] /= scale_factor
     lr_wcs.wcs.crpix[1] /= scale_factor
-    
     return lr_wcs
-
 
 def process_single_patch(args):
     """Funzione eseguita dal worker per una singola patch."""
@@ -264,12 +252,8 @@ def process_single_patch(args):
         return False 
     
     # 2. Crea WCS Target per la patch LR
-    
-    # WCS per la singola patch HR (traslato)
     hr_patch_wcs = wcs_h.deepcopy()
     hr_patch_wcs.wcs.crpix = hr_patch_wcs.wcs.crpix - np.array([x, y])
-    
-    # WCS Target (LR) - Risoluzione LR ma allineato a HR Patch
     lr_target_wcs = create_lr_wcs(hr_patch_wcs, (HR_SIZE, HR_SIZE), (LR_SIZE, LR_SIZE))
     
     # 3. Riproietta il mosaico Obs (raw) sul WCS Target (LR)
@@ -282,7 +266,6 @@ def process_single_patch(args):
         )
         patch_o_lr = np.nan_to_num(patch_o_lr).astype(np.float32)
     except Exception as e:
-        # print(f"Reprojection Error: {e}")
         return False
     
     # 4. Salvataggio
@@ -290,15 +273,12 @@ def process_single_patch(args):
     pair_path.mkdir(exist_ok=True)
     
     header_h = shared_data['header_h']
-    
-    # Header per HR Patch (usiamo WCS traslato)
     h_hr = hr_patch_wcs.to_header()
     fits.PrimaryHDU(patch_h.astype(np.float32), header=h_hr).writeto(pair_path/"hubble.fits", overwrite=True)
-    
-    # Header per LR Patch (usiamo WCS LR)
     h_lr = lr_target_wcs.to_header()
     fits.PrimaryHDU(patch_o_lr, header=h_lr).writeto(pair_path/"observatory.fits", overwrite=True)
     
+    # Salva il PNG solo ogni N patch per velocità
     if idx % SAVE_MAP_EVERY_N == 0:
         save_path = shared_data['out_png'] / f"pair_{idx:05d}_context.png"
         save_8panel_card(
@@ -341,7 +321,6 @@ def create_dataset_filtered(base_dir: Path) -> tuple[bool, Path] | None:
                 if d.ndim > 2: d = d[0]
                 return d, WCS(h[0].header), h[0].header
 
-        # Carica Hubble (HR) e Osservatorio (LR)
         data_h, wcs_h, header_h = load_fits(f_h_raw)
         data_o_raw, wcs_o_raw, _ = load_fits(f_o_raw)
         
@@ -366,12 +345,11 @@ def create_dataset_filtered(base_dir: Path) -> tuple[bool, Path] | None:
             tasks.append((y, x, task_id))
             task_id += 1
             
-    print(f"\n🚀 Avvio Processing Parallelo su {os.cpu_count()} core...")
+    print(f"\n🚀 Avvio Processing Parallelo (Stride={STRIDE}) su {os.cpu_count()} core...")
     print(f"   Totale Patch Candidate: {len(tasks)}")
 
     processed_count = 0
     
-    # Aggiornato initargs per non includere i vecchi file 'aligned'
     with ProcessPoolExecutor(max_workers=os.cpu_count(), 
                              initializer=init_worker, 
                              initargs=(data_h, data_o_raw, 
@@ -389,13 +367,17 @@ def create_dataset_filtered(base_dir: Path) -> tuple[bool, Path] | None:
     print(f"\n📦 Creazione archivio ZIP '{zip_filename}.zip'...")
     zip_path = base_dir / zip_filename
     shutil.make_archive(str(zip_path), 'zip', output_png_dir)
-    print(f"✅ Archivio creato: {zip_path}.zip")
-    # ==========================================
-
-    print(f"\n✅ Completato. {processed_count} patch valide generate su {len(tasks)}.")
+    
+    # ================= RIEPILOGO FINALE =================
+    print("\n" + "="*50)
+    print(f"✅ COMPLETATO! REPORT FINALE PER: {target_name}")
+    print("="*50)
+    print(f"🔢 STRIDE UTILIZZATO: {STRIDE} px")
+    print(f"🖼️  COPPIE GENERATE:  {processed_count}")
+    print("="*50)
     print(f"📂 Dataset: {output_fits_dir}")
-    print(f"🖼️  Visual:  {output_png_dir}")
     print(f"🗜️  Zip PNG: {zip_path}.zip")
+    
     return True, base_dir
 
 def select_target_directory():
@@ -409,11 +391,9 @@ def select_target_directory():
     except: return None
 
 def ask_continue(base_dir):
-    # Chiama Modello_2_pre_da_usopatch_dataset_step3.py che è lo Step 4 (Split)
     next_script = CURRENT_SCRIPT_DIR / 'Modello_2_pre_da_usopatch_dataset_step3.py'
     print(f"\nVuoi lanciare lo split dataset? (Script: {next_script.name})")
     if input("S/n: ").lower() in ['s', '', 'y']:
-        # Utilizza il percorso Python risolto per la compatibilità
         subprocess.run([sys.executable, str(next_script.resolve()), str(base_dir.resolve())])
 
 if __name__ == "__main__":
