@@ -358,7 +358,7 @@ def main():
             with fits.open(f) as o:
                 w = WCS(o[0].header)
                 dist = np.sqrt((w.wcs.crval[0]-h_center[0])**2 + (w.wcs.crval[1]-h_center[1])**2)
-                if dist < 0.1: 
+                if dist < 0.1: # soglia 0.03 gradi, al di sotto scarta tutto
                     o_files_good.append(f)
         except: pass
         
