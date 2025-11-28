@@ -16,6 +16,7 @@ import threading
 import warnings
 from pathlib import Path
 import subprocess
+import shutil
 
 # Gestione importazioni opzionali
 try:
@@ -25,12 +26,6 @@ except ImportError:
     REPROJECT_AVAILABLE = False
     print("⚠️ Libreria 'reproject' non trovata. La registrazione fallirà.")
 
-try:
-    import astroalign as aa
-    ASTROALIGN_AVAILABLE = True
-except ImportError:
-    ASTROALIGN_AVAILABLE = False
-
 warnings.filterwarnings('ignore')
 
 # ================= CONFIGURAZIONE =================
@@ -39,7 +34,14 @@ PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
 ROOT_DATA_DIR = PROJECT_ROOT / "data"
 LOG_DIR_ROOT = ROOT_DATA_DIR / "logs"
 
-NUM_THREADS = 6 
+# === CONFIGURAZIONE ASTAP ===
+# Modifica questo percorso se ASTAP è installato altrove
+if sys.platform == 'win32':
+    ASTAP_PATH = r"C:\Program Files\astap\astap.exe"
+else:
+    ASTAP_PATH = "astap" # Su Linux/Mac si assume sia nel PATH
+
+NUM_THREADS = 2 # Ridotto leggermente per evitare sovraccarico durante il solving
 log_lock = threading.Lock()
 
 # ================= UTILITY & SETUP =================
@@ -47,7 +49,7 @@ log_lock = threading.Lock()
 def setup_logging():
     os.makedirs(LOG_DIR_ROOT, exist_ok=True)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_file = LOG_DIR_ROOT / f'pipeline_smart_{timestamp}.log'
+    log_file = LOG_DIR_ROOT / f'pipeline_smart_astap_{timestamp}.log'
     
     logging.basicConfig(
         level=logging.INFO,
@@ -72,108 +74,66 @@ def select_target_directory():
         return [subdirs[idx]] if 0 <= idx < len(subdirs) else []
     except: return []
 
-# ================= STEP 1: WCS CONVERSION =================
+# ================= STEP 1: PLATE SOLVING CON ASTAP =================
 
-def parse_coordinates(ra_str, dec_str):
-    try:
-        c = SkyCoord(f"{ra_str} {dec_str}", unit=(u.hourangle, u.deg))
-        return c.ra.deg, c.dec.deg
-    except: raise ValueError
-
-def calculate_pixel_scale(header):
-    xpixsz = header.get('XPIXSZ')
-    focal = header.get('FOCALLEN', header.get('FOCAL'))
-    if xpixsz and focal:
-        # Fix formula scala: mm/mm * 206265
-        return ((xpixsz * header.get('XBINNING', 1)) / 1000.0 / focal) * 206265.0 / 3600.0
-    return 1.5 / 3600.0
-
-def create_wcs_from_header_robust(header, shape):
+def solve_with_astap(inp_file, out_file, logger):
     """
-    Tenta di creare un WCS valido leggendo vari formati di header.
+    Esegue il plate solving usando ASTAP CLI.
+    Copia il file, risolve e aggiorna l'header.
     """
-    # TENTATIVO 1: Se l'header ha già chiavi WCS standard (CRVAL1, CD1_1, etc.)
     try:
-        w = WCS(header)
-        if w.has_celestial:
-            return w
-    except:
-        pass
+        # 1. Copia il file originale nella destinazione (per non toccare il raw)
+        shutil.copy2(inp_file, out_file)
+        
+        # 2. Costruzione comando ASTAP
+        # -f: file input
+        # -update: aggiorna l'header del file esistente con la soluzione WCS
+        # -r 30: cerca in un raggio di 30 gradi (utile se le coordinate header sono imprecise)
+        # -fov 0: lascia che ASTAP calcoli o legga il FOV dall'header
+        cmd = [
+            ASTAP_PATH,
+            "-f", str(out_file),
+            "-update",
+            "-r", "30",  # Raggio di ricerca in gradi (aumentare a 180 per blind solving totale)
+            "-z", "0"    # Downsampling (0=auto, 1=no). Auto è più veloce per immagini grandi
+        ]
 
-    # TENTATIVO 2: Coordinate testuali (OBJCTRA/DEC) - Formato Amatoriale
-    try:
-        if 'OBJCTRA' in header and 'OBJCTDEC' in header:
-            ra, dec = parse_coordinates(header['OBJCTRA'], header['OBJCTDEC'])
-            scale = calculate_pixel_scale(header)
-            w = WCS(naxis=2)
-            w.wcs.crpix = [shape[1]/2, shape[0]/2]
-            w.wcs.crval = [ra, dec]
-            w.wcs.cdelt = [-scale, scale]
-            w.wcs.ctype = ["RA---TAN", "DEC--TAN"]
-            return w
-    except:
-        pass
+        # 3. Esecuzione (silenziosa)
+        # Su Windows bisogna gestire la creazione della finestra se non si vuole popup
+        startupinfo = None
+        if sys.platform == 'win32':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        
+        process = subprocess.run(
+            cmd, 
+            capture_output=True, 
+            text=True, 
+            startupinfo=startupinfo
+        )
 
-    # TENTATIVO 3: Coordinate Decimali dirette (RA/DEC) - Formato MaxIm DL/TheSkyX
-    try:
-        if 'RA' in header and 'DEC' in header:
-            # A volte sono in gradi, a volte stringhe. Proviamo float diretto.
-            w = WCS(naxis=2)
-            w.wcs.crpix = [shape[1]/2, shape[0]/2]
-            w.wcs.crval = [float(header['RA']), float(header['DEC'])]
-            scale = calculate_pixel_scale(header)
-            w.wcs.cdelt = [-scale, scale]
-            w.wcs.ctype = ["RA---TAN", "DEC--TAN"]
-            return w
-    except:
-        pass
-
-    return None
-
-def add_wcs_to_file(inp, out, log):
-    try:
-        # Apri il file. Gestisce file con estensioni multiple cercando la prima immagine valida.
-        with fits.open(inp) as hdul:
-            # Cerca il primo HDU che contiene dati immagine (2D o 3D)
-            valid_hdu = None
-            for hdu in hdul:
-                if hdu.data is not None and hdu.data.ndim >= 2:
-                    valid_hdu = hdu
-                    break
-            
-            if valid_hdu is None: 
-                # log.warning(f"Nessun dato immagine trovato in {inp.name}")
+        # 4. Verifica successo
+        # Controlliamo se il file ha ora una WCS valida
+        with fits.open(out_file) as hdul:
+            header = hdul[0].header
+            # ASTAP inserisce solitamente PLTSOLVD=T o CTYPE1 validi
+            w = WCS(header)
+            if w.has_celestial:
+                # Opzionale: Pulizia file temporanei generati da ASTAP (.wcs, .ini)
+                wcs_file = out_file.with_suffix('.wcs')
+                ini_file = out_file.with_suffix('.ini')
+                if wcs_file.exists(): os.remove(wcs_file)
+                if ini_file.exists(): os.remove(ini_file)
+                return True
+            else:
+                # logger.warning(f"ASTAP fallito su {inp_file.name}: Nessuna WCS trovata.")
                 return False
-
-            data = valid_hdu.data
-            header = valid_hdu.header.copy()
-
-            # Se ha già un WCS valido, salva e basta
-            try:
-                existing_wcs = WCS(header)
-                if existing_wcs.has_celestial:
-                    fits.PrimaryHDU(data=data, header=header).writeto(out, overwrite=True)
-                    return True
-            except: pass
-            
-            # Altrimenti prova a crearlo dai metadati
-            w = create_wcs_from_header_robust(header, data.shape)
-            
-            if not w:
-                # Ultimo tentativo: Cerca chiavi nell'header primario se siamo in un'estensione
-                if '0' in hdul: # Se esiste un PrimaryHDU separato
-                    w = create_wcs_from_header_robust(hdul[0].header, data.shape)
-            
-            if not w: 
-                return False
-            
-            # Aggiorna header
-            header.update(w.to_header())
-            fits.PrimaryHDU(data=data, header=header).writeto(out, overwrite=True)
-            return True
 
     except Exception as e:
-        # log.error(f"Errore elaborazione {inp.name}: {e}")
+        logger.error(f"Errore ASTAP su {inp_file.name}: {e}")
+        # Se fallisce, cancelliamo il file di output per non lasciare file corrotti
+        if out_file.exists():
+            os.remove(out_file)
         return False
 
 def process_step1_folder(inp_dir, out_dir, logger):
@@ -186,24 +146,51 @@ def process_step1_folder(inp_dir, out_dir, logger):
         logger.warning(f"Nessun file trovato in {inp_dir}")
         return 0
 
+    print(f"   Avvio ASTAP Plate Solving su {len(files)} immagini in {inp_dir.name}...")
+    
     success = 0
-    for f in tqdm(files, desc=f"WCS {inp_dir.name}"):
-        if add_wcs_to_file(f, out_dir / f"{f.stem}_wcs.fits", logger): success += 1
+    # Usiamo ThreadPool per parallelizzare ASTAP (ASTAP supporta istanze multiple)
+    with ThreadPoolExecutor(max_workers=NUM_THREADS) as executor:
+        futures = []
+        for f in files:
+            out_f = out_dir / f"{f.stem}_solved.fits"
+            futures.append(executor.submit(solve_with_astap, f, out_f, logger))
+            
+        for f in tqdm(as_completed(futures), total=len(files), desc=f"Solving {inp_dir.name}"):
+            if f.result():
+                success += 1
+                
     return success
 
-# ================= STEP 2: REGISTRAZIONE SMART =================
+# ================= STEP 2: REGISTRAZIONE SMART (REPROJECT) =================
 
 def extract_wcs_info(f, logger=None):
     try:
         with fits.open(f) as h:
+            # Carica WCS ignorando distorsioni SIP per leggere solo centro e scala approssimata
             w = WCS(h[0].header)
             if not w.has_celestial: return None
-            return {'file': f, 'wcs': w, 'shape': h[0].data.shape, 
-                    'ra': w.wcs.crval[0], 'dec': w.wcs.crval[1],
-                    'scale': abs(w.wcs.cdelt[0])*3600}
-    except: return None
+            
+            # Calcola scala media
+            if w.wcs.cdelt[0] != 0:
+                scale = abs(w.wcs.cdelt[0]) * 3600
+            else:
+                # Fallback se CDELT è 0 (es. se usa matrice CD)
+                scale = astropy.wcs.utils.proj_plane_pixel_scales(w)[0] * 3600
 
-def register_single_image_smart(info, ref_wcs, ref_data_h, out_dir, logger):
+            return {
+                'file': f, 
+                'wcs': w, 
+                'shape': h[0].data.shape, 
+                'ra': w.wcs.crval[0], 
+                'dec': w.wcs.crval[1],
+                'scale': scale
+            }
+    except Exception as e: 
+        # logger.warning(f"Errore lettura WCS {f.name}: {e}")
+        return None
+
+def register_single_image_smart(info, ref_wcs, out_dir, logger):
     try:
         fname = info['file'].name
         with fits.open(info['file']) as hdul:
@@ -212,24 +199,34 @@ def register_single_image_smart(info, ref_wcs, ref_data_h, out_dir, logger):
             wcs_orig = WCS(header)
             if data.ndim == 3: data = data[0]
 
-        # Target WCS: Usa il centro del Master ma mantiene la scala nativa dell'immagine
-        native_scale = info['scale'] / 3600.0
-        target_wcs = WCS(naxis=2)
-        target_wcs.wcs.crval = ref_wcs.wcs.crval # Centriamo tutto sul master comune
-        target_wcs.wcs.ctype = ref_wcs.wcs.ctype
-        target_wcs.wcs.cdelt = [-native_scale, native_scale]
-        target_wcs.wcs.crpix = [data.shape[1]/2, data.shape[0]/2] 
+        # --- SETUP SISTEMA DI RIFERIMENTO TARGET ---
+        # 1. Centro: Usa il centro del Master (Hubble)
+        # 2. Scala: Mantiene la scala nativa dell'immagine corrente
+        # 3. Proiezione: FORZA 'TAN' (Gnomonica) per eliminare distorsioni SIP/esotiche
         
-        output_data = None
-        method = "WCS_Reproject"
-
-        if output_data is None:
-            output_data, _ = reproject_interp((data, wcs_orig), target_wcs, shape_out=data.shape)
+        native_scale_deg = info['scale'] / 3600.0
+        
+        target_wcs = WCS(naxis=2)
+        target_wcs.wcs.crval = ref_wcs.wcs.crval # Centro RA/DEC del Master
+        target_wcs.wcs.crpix = [data.shape[1]/2, data.shape[0]/2] # Centro pixel immagine
+        target_wcs.wcs.cdelt = [-native_scale_deg, native_scale_deg] # Scala nativa
+        target_wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"] # Proiezione Standard Piatta
+        
+        # Orientamento: Assumiamo Nord in alto (rotazione 0) per standardizzare
+        # Se si vuole preservare la rotazione originale del master, bisognerebbe copiare PC/CD matrix
+        # Qui forziamo Nord-Su per facilitare l'estrazione patch
+        
+        output_data, _ = reproject_interp((data, wcs_orig), target_wcs, shape_out=data.shape)
 
         # Salva il file registrato
         out_name = f"reg_{fname}"
         hdr_new = target_wcs.to_header()
-        hdr_new['REG_METH'] = method
+        hdr_new['REG_METH'] = "ASTAP_SOLVE+REPROJECT"
+        
+        # Mantiene alcune chiavi utili originali
+        for k in ['EXPTIME', 'FILTER', 'OBJECT']:
+            if k in header: hdr_new[k] = header[k]
+
         fits.PrimaryHDU(data=output_data.astype(np.float32), header=hdr_new).writeto(out_dir/out_name, overwrite=True)
         
         return {'status': 'ok', 'file': out_name}
@@ -238,45 +235,43 @@ def register_single_image_smart(info, ref_wcs, ref_data_h, out_dir, logger):
         return {'status': 'err', 'file': fname, 'err': str(e)}
 
 def main_registration(h_in, o_in, h_out, o_out, logger):
-    # 1. Trova i file generati dallo Step 1
-    h_files = list(h_in.glob('*.fits'))
-    o_files = list(o_in.glob('*.fits'))
+    # 1. Trova i file Solved dello Step 1
+    h_files = list(h_in.glob('*_solved.fits'))
+    o_files = list(o_in.glob('*_solved.fits'))
     
     # 2. Estrai Info WCS
     h_infos = [extract_wcs_info(f, logger) for f in h_files]
     o_infos = [extract_wcs_info(f, logger) for f in o_files]
     
-    # Filtra i None (file corrotti)
     h_infos = [x for x in h_infos if x]
     o_infos = [x for x in o_infos if x]
     
     if not h_infos: 
-        logger.error("Nessun file Hubble valido per la registrazione (Step 1 fallito o file vuoti).")
+        logger.error("Nessun file Hubble risolto (ASTAP ha fallito o cartella vuota).")
         return False
     
-    # Usa il primo Hubble come "Master Reference" per il centro WCS
+    # MASTER REFERENCE: Primo file Hubble
     common_wcs = h_infos[0]['wcs']
     
-    print(f"   Avvio registrazione su {len(h_infos)} file Hubble e {len(o_infos)} file Osservatorio...")
+    print(f"   Master Reference RA/DEC: {common_wcs.wcs.crval}")
+    print(f"   Avvio registrazione su {len(h_infos)} Hubble e {len(o_infos)} Osservatorio...")
     
     success = 0
     with ThreadPoolExecutor(max_workers=NUM_THREADS) as ex:
         futures = []
         
-        # Registra Hubble (HR) -> h_out
+        # Registra Hubble
         for info in h_infos:
-            futures.append(ex.submit(register_single_image_smart, info, common_wcs, None, h_out, logger))
+            futures.append(ex.submit(register_single_image_smart, info, common_wcs, h_out, logger))
             
-        # Registra Osservatorio (LR) -> o_out
+        # Registra Osservatorio
         for info in o_infos:
-            futures.append(ex.submit(register_single_image_smart, info, common_wcs, None, o_out, logger))
+            futures.append(ex.submit(register_single_image_smart, info, common_wcs, o_out, logger))
             
         for f in tqdm(as_completed(futures), total=len(futures), desc="Registrazione"):
             res = f.result()
-            if res['status'] == 'ok': 
-                success += 1
-            else:
-                logger.warning(f"Errore su {res['file']}: {res['err']}")
+            if res['status'] == 'ok': success += 1
+            else: logger.warning(f"Err {res['file']}: {res['err']}")
             
     return success > 0
 
@@ -284,42 +279,48 @@ def main_registration(h_in, o_in, h_out, o_out, logger):
 
 def main():
     logger = setup_logging()
+    
+    # Verifica presenza ASTAP
+    if not Path(ASTAP_PATH).exists() and shutil.which("astap") is None:
+        print(f"❌ ERRORE CRITICO: ASTAP non trovato in: {ASTAP_PATH}")
+        print("   Installa ASTAP o correggi la variabile ASTAP_PATH nello script.")
+        return
+
     targets = select_target_directory()
     if not targets: return
 
     for BASE_DIR in targets:
         print(f"\n🚀 ELABORAZIONE: {BASE_DIR.name}")
         
-        # Paths
         in_o = BASE_DIR / '1_originarie/local_raw'
         in_h = BASE_DIR / '1_originarie/img_lights'
         
-        # Output Step 1 (Temporanei)
-        out_wcs_o = BASE_DIR / '2_wcs/observatory'
-        out_wcs_h = BASE_DIR / '2_wcs/hubble'
+        # Cartelle output Step 1 (ora contengono i file "Solved")
+        out_solved_o = BASE_DIR / '2_solved_astap/observatory'
+        out_solved_h = BASE_DIR / '2_solved_astap/hubble'
         
-        # Output Step 2 (Finali per estrazione patch)
+        # Cartelle output Step 2 (Registered)
         out_reg_o = BASE_DIR / '3_registered_native/observatory'
         out_reg_h = BASE_DIR / '3_registered_native/hubble'
         
-        for p in [out_wcs_o, out_wcs_h, out_reg_o, out_reg_h]: p.mkdir(parents=True, exist_ok=True)
+        for p in [out_solved_o, out_solved_h, out_reg_o, out_reg_h]: 
+            p.mkdir(parents=True, exist_ok=True)
 
-        # Step 1: Conversione WCS
-        print("   [1/2] Conversione WCS...")
-        s1 = process_step1_folder(in_o, out_wcs_o, logger)
-        s2 = process_step1_folder(in_h, out_wcs_h, logger)
+        # Step 1: Plate Solving
+        print("   [1/2] Astrometric Solving (ASTAP)...")
+        s1 = process_step1_folder(in_o, out_solved_o, logger)
+        s2 = process_step1_folder(in_h, out_solved_h, logger)
         
         if s1+s2 == 0:
-            print("   ❌ Nessun file convertito (Input vuoto o errori). Salto.")
+            print("   ❌ Nessun file risolto. Controlla i database stellari (H17/H18) di ASTAP.")
             continue
 
         # Step 2: Registrazione
-        print("   [2/2] Registrazione...")
-        # Input per step 2 sono gli output di step 1
-        if main_registration(out_wcs_h, out_wcs_o, out_reg_h, out_reg_o, logger):
-            print("   ✅ Registrazione Completata. File pronti in 3_registered_native.")
+        print("   [2/2] Registrazione e Riproiezione...")
+        if main_registration(out_solved_h, out_solved_o, out_reg_h, out_reg_o, logger):
+            print("   ✅ Pipeline Completata.")
         else:
-            print("   ❌ Errore Registrazione.")
+            print("   ❌ Errore nella fase di registrazione.")
 
 if __name__ == "__main__":
     main()

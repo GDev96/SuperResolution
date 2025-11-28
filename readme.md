@@ -136,3 +136,23 @@ Non hai creato il venv. Rifai il punto 2.
 ---
 
 **Nota**: Ricorda sempre di attivare il virtual environment prima di lavorare sul progetto!
+
+
+
+
+Controllare lo standard delle coordinate ra e dec
+conversione wcs in ra, dec
+
+Controllare questo:
+        # Pixel scale (negativo per RA per convenzione astronomica)
+        wcs.wcs.cdelt = [-pixel_scale, pixel_scale]
+        
+        # Tipo proiezione (TAN = tangente, standard per campi piccoli)
+        wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+        
+        # Sistema di riferimento
+        wcs.wcs.radesys = 'ICRS'
+        wcs.wcs.equinox = 2000.0
+
+
+Controllare header hubble per plate solving (astronet/astropy)
