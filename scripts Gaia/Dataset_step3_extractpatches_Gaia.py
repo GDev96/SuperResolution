@@ -30,7 +30,7 @@ ROOT_DATA_DIR = PROJECT_ROOT / "data"
 # PARAMETRI DATASET
 HR_SIZE = 512 
 AI_LR_SIZE = 128
-STRIDE = 51 
+STRIDE = 100
 MIN_COVERAGE = 0.50 
 MIN_PIXEL_VALUE = 0.0001 
 DEBUG_SAMPLES = 10
@@ -62,75 +62,59 @@ def get_robust_preview(data, size=None):
     except:
         return np.zeros_like(data)
 
-def calculate_wcs_corners(wcs, x_min, y_min, size):
+def calculate_wcs_corners(wcs, size):
+    """Calcola coordinate angoli e centro per debug"""
     corner_pixels = np.array([
         [0, 0], [size, 0], [0, size], [size, size]
     ])
     world_coords = wcs.pixel_to_world(corner_pixels[:, 0], corner_pixels[:, 1])
     
-    formatted_coords = {}
-    labels = ['TL', 'TR', 'BL', 'BR']
-    for i, label in enumerate(labels):
-        formatted_coords[label] = f"RA:{world_coords[i].ra.deg:.5f} DEC:{world_coords[i].dec.deg:.5f}"
-        
     center_world = wcs.pixel_to_world(size/2, size/2)
-    return formatted_coords, center_world.ra.deg, center_world.dec.deg
+    return center_world.ra.deg, center_world.dec.deg
 
 # ==================================================================================
-# FUNZIONE DI DEBUG AGGIORNATA (Con Poligono Rosso su Obs)
+# FUNZIONE DI DEBUG 
 # ==================================================================================
 def save_diagnostic_card(data_h_orig, data_o_raw_orig, 
                          patch_h, patch_o_lr, 
                          x, y, wcs_h, wcs_o_raw,
                          lr_wcs_target, 
-                         raw_crop_size, h_fov_deg, save_path):
+                         h_fov_deg, save_path):
     
     try:
-        fig = plt.figure(figsize=(20, 12)) 
+        fig = plt.figure(figsize=(20, 12), facecolor='#1e1e1e') 
         gs = fig.add_gridspec(2, 3)
 
         # --- Calcoli Preliminari ---
-        # WCS Hubble locale per info testuali
+        # WCS Hubble locale
         h_patch_wcs = wcs_h.deepcopy()
-        h_patch_wcs.wcs.crpix = h_patch_wcs.wcs.crpix - np.array([x, y])
-        h_coords_str, h_ra, h_dec = calculate_wcs_corners(h_patch_wcs, 0, 0, HR_SIZE)
-        lr_coords_str, lr_ra, lr_dec = calculate_wcs_corners(lr_wcs_target, 0, 0, AI_LR_SIZE)
+        h_patch_wcs.wcs.crpix -= np.array([x, y])
+        
+        h_ra, h_dec = calculate_wcs_corners(h_patch_wcs, HR_SIZE)
+        lr_ra, lr_dec = calculate_wcs_corners(lr_wcs_target, AI_LR_SIZE)
         
         mismatch_ra = abs(h_ra - lr_ra) * 3600
         mismatch_dec = abs(h_dec - lr_dec) * 3600
 
-        # --- CALCOLO DEL BOX ROSSO PER L'OSSERVATORIO ---
-        # 1. Definiamo i 4 angoli della patch LR target (in pixel locali 0-128)
+        # --- CALCOLO POLIGONO ROSSO ---
         lr_corners_pix = np.array([
-            [0, 0],
-            [AI_LR_SIZE, 0],
-            [AI_LR_SIZE, AI_LR_SIZE],
-            [0, AI_LR_SIZE]
+            [0, 0], [AI_LR_SIZE, 0], [AI_LR_SIZE, AI_LR_SIZE], [0, AI_LR_SIZE]
         ])
-        # 2. Convertiamo in coordinate mondo (RA/Dec) usando il WCS target
         lr_corners_world = lr_wcs_target.pixel_to_world(lr_corners_pix[:, 0], lr_corners_pix[:, 1])
-        
-        # 3. Convertiamo le coord mondo nei pixel dell'immagine ORIGINALE dell'Osservatorio
         obs_corners_pix_raw = wcs_o_raw.world_to_pixel(lr_corners_world)
         
-        # 4. Calcoliamo i fattori di scala per il plot di preview (512x512)
         scale_ox = 512 / data_o_raw_orig.shape[1]
         scale_oy = 512 / data_o_raw_orig.shape[0]
-        
-        # 5. Scaliamo le coordinate per il plot
-        plot_corners_x = obs_corners_pix_raw[0] * scale_ox
-        plot_corners_y = obs_corners_pix_raw[1] * scale_oy
-        
-        # Creiamo i vertici per il poligono
-        polygon_verts = np.stack([plot_corners_x, plot_corners_y], axis=1)
+        polygon_verts = np.stack([obs_corners_pix_raw[0] * scale_ox, obs_corners_pix_raw[1] * scale_oy], axis=1)
 
-        # --- RIGA 1: CONTESTO GLOBALE ---
-        # 1. Hubble Map
+        # --- PLOTTING ---
+        
+        # 1. Global Hubble
         ax1 = fig.add_subplot(gs[0, 0])
         ax1.axis('off')
         h_small = get_robust_preview(data_h_orig, 512)
         ax1.imshow(h_small, origin='lower', cmap='inferno')
-        ax1.set_title("GLOBAL HUBBLE MAP", color='red', fontweight='bold')
+        ax1.set_title("GLOBAL HUBBLE MAP", color='cyan', fontweight='bold')
         
         scale_hy = 512 / data_h_orig.shape[0]
         scale_hx = 512 / data_h_orig.shape[1]
@@ -138,61 +122,62 @@ def save_diagnostic_card(data_h_orig, data_o_raw_orig,
                                    linewidth=2, edgecolor='cyan', facecolor='none')
         ax1.add_patch(rect_h)
 
-        # 2. Observatory Map (Con Poligono Rosso)
+        # 2. Global Obs
         ax2 = fig.add_subplot(gs[0, 1])
+        ax2.axis('off')
         o_small = get_robust_preview(data_o_raw_orig, 512)
         ax2.imshow(o_small, origin='lower', cmap='viridis')
-        ax2.set_title("GLOBAL OBS MAP", color='green', fontweight='bold')
-        ax2.axis('off')
-        
-        # Aggiungiamo il poligono rosso calcolato sopra
-        poly_o = patches.Polygon(polygon_verts, linewidth=2, edgecolor='red', facecolor='none')
+        ax2.set_title("GLOBAL OBS MAP", color='lime', fontweight='bold')
+        poly_o = patches.Polygon(polygon_verts, linewidth=2, edgecolor='lime', facecolor='none')
         ax2.add_patch(poly_o)
 
-        # 3. Testo
+        # 3. Info Text
         ax3 = fig.add_subplot(gs[0, 2])
         ax3.axis('off')
+        color_status = 'lime' if (mismatch_ra < 1.0 and mismatch_dec < 1.0) else 'red'
         txt_coords = (f"📍 ALIGNMENT CHECK (Pair {save_path.stem})\n"
                       f"-----------------------------------\n"
-                      f"RAW CROP SIZE: ~{raw_crop_size}x{raw_crop_size} px (estimated)\n"
-                      f"HUBBLE RA Center: {h_ra:.5f}°\n"
-                      f"LR RA Center:     {lr_ra:.5f}°\n"
-                      f"MISMATCH (RA/DEC): {mismatch_ra:.2f}\" / {mismatch_dec:.2f}\"\n"
+                      f"HUBBLE RA Center: {h_ra:.6f}°\n"
+                      f"LR RA Center:     {lr_ra:.6f}°\n"
+                      f"MISMATCH:         {mismatch_ra:.3f}\" / {mismatch_dec:.3f}\"\n"
                       f"-----------------------------------\n"
-                      f"CYAN BOX: Patch Hubble\n"
-                      f"RED POLY: Area di estrazione Obs")
-        ax3.text(0.01, 0.5, txt_coords, fontsize=11, verticalalignment='center', family='monospace')
+                      f"STATUS: ")
+        ax3.text(0.05, 0.6, txt_coords, fontsize=12, color='white', verticalalignment='center', family='monospace')
+        ax3.text(0.3, 0.47, "PERFECT" if color_status=='lime' else "MISMATCH", fontsize=14, color=color_status, fontweight='bold', family='monospace')
 
-        # --- RIGA 2: DETTAGLIO PATCH ---
-        inp_s = resize(get_robust_preview(patch_o_lr), (HR_SIZE, HR_SIZE), order=1)
-        tar_n = get_robust_preview(patch_h)
-        rgb = np.zeros((HR_SIZE, HR_SIZE, 3))
-        rgb[..., 0] = tar_n * 0.9  
-        rgb[..., 1] = inp_s * 0.9  
-
+        # 4. Hubble Patch
         ax4 = fig.add_subplot(gs[1, 0])
+        tar_n = get_robust_preview(patch_h)
         ax4.imshow(tar_n, origin='lower', cmap='inferno')
-        ax4.set_title("1. Hubble Patch (Target)", color='red')
+        ax4.set_title("1. Hubble Patch (HR)", color='white')
         ax4.axis('off')
 
+        # 5. Obs Patch
         ax5 = fig.add_subplot(gs[1, 1])
-        ax5.imshow(get_robust_preview(patch_o_lr), origin='lower', cmap='viridis')
-        ax5.set_title(f"2. Obs Patch (Input) | {AI_LR_SIZE}px", color='green')
+        inp_s = get_robust_preview(patch_o_lr) # No resize per vedere i pixel reali
+        ax5.imshow(inp_s, origin='lower', cmap='viridis')
+        ax5.set_title(f"2. Obs Patch (LR Input)", color='white')
         ax5.axis('off')
 
+        # 6. Overlay
+        # Resize Obs to match Hubble for overlay
+        inp_resized = resize(inp_s, (HR_SIZE, HR_SIZE), order=0, anti_aliasing=False)
+        rgb = np.zeros((HR_SIZE, HR_SIZE, 3))
+        rgb[..., 0] = tar_n  # R = Hubble
+        rgb[..., 1] = inp_resized  # G = Obs
+        
         ax6 = fig.add_subplot(gs[1, 2])
         ax6.imshow(rgb, origin='lower')
-        ax6.text(0.02, 0.02, rf"Mismatch: {mismatch_ra:.2f} arcsec", transform=ax6.transAxes, color='white', fontsize=10)
-        ax6.set_title(f"3. Overlay (Detail)", color='white')
+        ax6.set_title(f"3. Overlay (R=HST, G=OBS)", color='white')
+        ax6.text(0.02, 0.02, f"Err: {max(mismatch_ra, mismatch_dec):.2f}\"", transform=ax6.transAxes, color=color_status, fontsize=10, fontweight='bold')
         ax6.axis('off')
         
         plt.tight_layout()
-        plt.savefig(save_path, dpi=90)
+        plt.savefig(save_path, dpi=100, facecolor='#1e1e1e')
         plt.close(fig)
         
     except Exception as e:
-        print(f"\n❌ ERRORE CREAZIONE PNG ({save_path.name}): {e}")
-        # traceback.print_exc() # Decommenta per debug profondo
+        print(f"\n❌ ERRORE PNG: {e}")
 
 # --- WORKER SETUP & JOB ---
 
@@ -207,15 +192,31 @@ def init_worker(d_h, hdr_h, w_h, out_fits, out_png, h_fov_deg, o_files):
     shared_data['o_files'] = o_files
     patch_index_counter = 0
 
-def create_lr_wcs(hr_wcs, lr_size, fov_deg):
-    scale = fov_deg / lr_size
-    w = WCS(naxis=2)
-    w.wcs.crval = hr_wcs.wcs.crval
-    w.wcs.ctype = ["RA---TAN", "DEC--TAN"]
-    w.wcs.crpix = [lr_size / 2.0, lr_size / 2.0]
-    w.wcs.cdelt = [-scale, scale]
-    w.wcs.pc = np.eye(2)
-    return w
+def create_aligned_lr_wcs(hr_patch_wcs, hr_size, lr_size):
+    """
+    Crea un WCS per la patch LR derivandolo ESATTAMENTE dalla patch HR.
+    Mantiene rotazione (PC matrix) e centro, scala solo la dimensione pixel.
+    """
+    # Fattore di scala (es. 512 / 128 = 4.0)
+    # I pixel LR sono 4 volte più grandi
+    factor = hr_size / lr_size
+    
+    w_lr = hr_patch_wcs.deepcopy()
+    
+    # 1. Scaliamo la dimensione del pixel (CDELT o CD Matrix)
+    if w_lr.wcs.has_cd():
+        w_lr.wcs.cd *= factor
+    else:
+        w_lr.wcs.cdelt *= factor
+        
+    # 2. Scaliamo il pixel di riferimento (CRPIX)
+    # Se il centro era a (256, 256) in HR, ora deve essere a (64, 64) in LR
+    w_lr.wcs.crpix /= factor
+    
+    # NOTA: CRVAL e PC/Rotation rimangono IDENTICI all'originale.
+    # Questo garantisce l'allineamento perfetto.
+    
+    return w_lr
 
 def process_single_patch_multi(args):
     global patch_index_counter
@@ -224,15 +225,20 @@ def process_single_patch_multi(args):
     data_h = shared_data['h']
     wcs_h = shared_data['wcs_h']
 
+    # Estrazione patch Hubble
     patch_h = data_h[y:y+HR_SIZE, x:x+HR_SIZE]
     
+    # Controllo copertura (evita patch nere)
     if np.count_nonzero(patch_h > MIN_PIXEL_VALUE) / patch_h.size < MIN_COVERAGE:
         return 0
 
-    patch_h_wcs = wcs_h.deepcopy()
-    patch_h_wcs.wcs.crpix -= np.array([x, y])
+    # Creazione WCS Locale per la patch Hubble
+    # Astropy gestisce lo slice aggiornando CRPIX automaticamente
+    patch_h_wcs = wcs_h[y:y+HR_SIZE, x:x+HR_SIZE]
 
-    lr_target_wcs = create_lr_wcs(patch_h_wcs, AI_LR_SIZE, shared_data['h_fov_deg'])
+    # --- FIX FONDAMENTALE ---
+    # Invece di creare un WCS da zero, scaliamo quello di Hubble
+    lr_target_wcs = create_aligned_lr_wcs(patch_h_wcs, HR_SIZE, AI_LR_SIZE)
     
     saved_count = 0
     
@@ -243,6 +249,7 @@ def process_single_patch_multi(args):
                 if data_o.ndim > 2: data_o = data_o[0]
                 wcs_o = WCS(o[0].header)
 
+            # Riproiezione: Osservatorio -> LR WCS (Allineato a Hubble)
             patch_o_lr, footprint = reproject_interp(
                 (data_o, wcs_o),
                 lr_target_wcs,
@@ -251,6 +258,7 @@ def process_single_patch_multi(args):
             )
             patch_o_lr = np.nan_to_num(patch_o_lr)
 
+            # Controllo validità patch Obs
             valid_mask = (patch_o_lr > MIN_PIXEL_VALUE)
             if np.sum(valid_mask) < (AI_LR_SIZE**2 * MIN_COVERAGE):
                 continue
@@ -262,28 +270,22 @@ def process_single_patch_multi(args):
             pair_dir = shared_data['out_fits'] / f"pair_{idx:06d}"
             pair_dir.mkdir(exist_ok=True)
             
+            # Salvataggio FITS
             fits.PrimaryHDU(patch_h.astype(np.float32), header=patch_h_wcs.to_header()).writeto(pair_dir/"hubble.fits", overwrite=True)
             fits.PrimaryHDU(patch_o_lr.astype(np.float32), header=lr_target_wcs.to_header()).writeto(pair_dir/"observatory.fits", overwrite=True)
             
             saved_count += 1
             
+            # Salvataggio Debug PNG (solo i primi N campioni)
             if idx < DEBUG_SAMPLES:
-                try:
-                    obs_scale = get_pixel_scale_deg(wcs_o)
-                    raw_size = int(shared_data['h_fov_deg'] / obs_scale)
-                    
-                    png_path = shared_data['out_png'] / f"check_pair_{idx:06d}.jpg"
-                    
-                    save_diagnostic_card(
-                        data_h, data_o,
-                        patch_h, patch_o_lr,
-                        x, y, wcs_h, wcs_o,
-                        lr_target_wcs, 
-                        raw_size, shared_data['h_fov_deg'], png_path
-                    )
-                except Exception as e:
-                    print(f"   [WARNING] Fallito salvataggio PNG per {idx}: {e}")
-                    # traceback.print_exc()
+                png_path = shared_data['out_png'] / f"check_pair_{idx:06d}.jpg"
+                save_diagnostic_card(
+                    data_h, data_o,
+                    patch_h, patch_o_lr,
+                    x, y, wcs_h, wcs_o,
+                    lr_target_wcs, 
+                    shared_data['h_fov_deg'], png_path
+                )
 
         except Exception:
             continue
@@ -303,8 +305,8 @@ def select_target_directory():
     except: return None
 
 def main():
-    print(f"🚀 ESTRAZIONE DINAMICA PATCH (HUBBLE vs OBS)")
-    print(f"   Config: HR={HR_SIZE}px, LR={AI_LR_SIZE}px")
+    print(f"🚀 ESTRAZIONE PATCH WCS-AWARE (FIXED ALIGNMENT)")
+    print(f"   Config: HR={HR_SIZE}px, LR={AI_LR_SIZE}px")
     
     target_dir = ROOT_DATA_DIR / "M1" 
     if len(sys.argv) > 1: 
@@ -352,20 +354,20 @@ def main():
 
     # Filtro file Osservatorio
     o_files_good = []
-    print(f"   🔍 Filtraggio file non allineati...")
+    print(f"   🔍 Filtraggio file non allineati...")
     for f in o_files_all:
         try:
             with fits.open(f) as o:
                 w = WCS(o[0].header)
                 dist = np.sqrt((w.wcs.crval[0]-h_center[0])**2 + (w.wcs.crval[1]-h_center[1])**2)
-                if dist < 0.1: # soglia 0.03 gradi, al di sotto scarta tutto
+                if dist < 0.1: 
                     o_files_good.append(f)
         except: pass
         
-    print(f"   ✅ File validi trovati: {len(o_files_good)} (scartati {len(o_files_all)-len(o_files_good)})")
+    print(f"   ✅ File validi trovati: {len(o_files_good)}")
     
     if not o_files_good:
-        print("❌ Nessun file dell'osservatorio è centrato su Hubble. Controlla la registrazione.")
+        print("❌ Nessun file dell'osservatorio è centrato su Hubble.")
         return
 
     h_h, h_w = d_h.shape
@@ -374,7 +376,7 @@ def main():
         for x in range(0, h_w - HR_SIZE + 1, STRIDE):
             tasks.append((h_master_path, y, x))
             
-    print(f"   📦 Patch Hubble da processare: {len(tasks)}")
+    print(f"   📦 Patch Hubble da processare: {len(tasks)}")
     
     print(f"\n🚀 Avvio estrazione...")
     total_saved = 0
@@ -386,9 +388,9 @@ def main():
         total_saved = sum(results)
         
     print(f"\n✅ COMPLETATO.")
-    print(f"   Coppie salvate: {total_saved}")
-    print(f"   Dataset: {out_fits}")
-    print(f"   Validation Images: {out_png}")
+    print(f"   Coppie salvate: {total_saved}")
+    print(f"   Dataset: {out_fits}")
+    print(f"   Validation Images: {out_png}")
 
 if __name__ == "__main__":
     main()
