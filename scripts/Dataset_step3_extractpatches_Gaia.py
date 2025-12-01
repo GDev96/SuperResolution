@@ -33,7 +33,7 @@ AI_LR_SIZE = 128
 STRIDE = 150
 MIN_COVERAGE = 0.50 
 MIN_PIXEL_VALUE = 0.0001 
-DEBUG_SAMPLES = 10
+DEBUG_SAMPLES = 50
 
 log_lock = threading.Lock()
 # ==========================================================
@@ -306,7 +306,7 @@ def select_target_directory():
 
 def main():
     print(f"🚀 ESTRAZIONE PATCH WCS-AWARE (FIXED ALIGNMENT)")
-    print(f"   Config: HR={HR_SIZE}px, LR={AI_LR_SIZE}px")
+    print(f"   Config: HR={HR_SIZE}px, LR={AI_LR_SIZE}px")
     
     target_dir = ROOT_DATA_DIR / "M1" 
     if len(sys.argv) > 1: 
@@ -354,7 +354,7 @@ def main():
 
     # Filtro file Osservatorio
     o_files_good = []
-    print(f"   🔍 Filtraggio file non allineati...")
+    print(f"   🔍 Filtraggio file non allineati...")
     for f in o_files_all:
         try:
             with fits.open(f) as o:
@@ -364,7 +364,7 @@ def main():
                     o_files_good.append(f)
         except: pass
         
-    print(f"   ✅ File validi trovati: {len(o_files_good)}")
+    print(f"   ✅ File validi trovati: {len(o_files_good)}")
     
     if not o_files_good:
         print("❌ Nessun file dell'osservatorio è centrato su Hubble.")
@@ -376,7 +376,7 @@ def main():
         for x in range(0, h_w - HR_SIZE + 1, STRIDE):
             tasks.append((h_master_path, y, x))
             
-    print(f"   📦 Patch Hubble da processare: {len(tasks)}")
+    print(f"   📦 Patch Hubble da processare: {len(tasks)}")
     
     print(f"\n🚀 Avvio estrazione...")
     total_saved = 0
@@ -388,9 +388,23 @@ def main():
         total_saved = sum(results)
         
     print(f"\n✅ COMPLETATO.")
-    print(f"   Coppie salvate: {total_saved}")
-    print(f"   Dataset: {out_fits}")
-    print(f"   Validation Images: {out_png}")
+    print(f"   Coppie salvate: {total_saved}")
+    print(f"   Dataset: {out_fits}")
+    print(f"   Validation Images: {out_png}")
+
+    # ================= ZIPPING SECTION =================
+    target_name = target_dir.name
+    
+    # Zip del Dataset FITS
+    zip_fits_name = target_dir / f"{target_name}_patches"
+    print(f"   🗜️  Creazione ZIP Dataset: {zip_fits_name}.zip")
+    shutil.make_archive(str(zip_fits_name), 'zip', str(out_fits))
+    
+    # Zip dei Debug Visuals
+    zip_png_name = target_dir / f"{target_name}_debug_visuals"
+    print(f"   🗜️  Creazione ZIP Debug: {zip_png_name}.zip")
+    shutil.make_archive(str(zip_png_name), 'zip', str(out_png))
+    # ===================================================
 
 if __name__ == "__main__":
     main()
