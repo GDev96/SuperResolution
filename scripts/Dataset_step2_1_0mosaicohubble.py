@@ -23,7 +23,7 @@ warnings.filterwarnings('ignore')
 CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
 ROOT_DATA_DIR = PROJECT_ROOT / "data"
-LOG_DIR_ROOT = ROOT_DATA_DIR / "logs"
+LOG_DIR_ROOT = PROJECT_ROOT/ "logs"
 SCRIPTS_DIR = CURRENT_SCRIPT_DIR
 
 # ============================================================================
