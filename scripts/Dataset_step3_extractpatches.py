@@ -135,7 +135,7 @@ def save_diagnostic_card(data_h_orig, data_o_raw_orig,
         ax3 = fig.add_subplot(gs[0, 2])
         ax3.axis('off')
         color_status = 'lime' if (mismatch_ra < 1.0 and mismatch_dec < 1.0) else 'red'
-        txt_coords = (f"📍 ALIGNMENT CHECK (Pair {save_path.stem})\n"
+        txt_coords = (f"ALIGNMENT CHECK (Pair {save_path.stem})\n"
                       f"-----------------------------------\n"
                       f"HUBBLE RA Center: {h_ra:.6f}°\n"
                       f"LR RA Center:     {lr_ra:.6f}°\n"
@@ -177,7 +177,7 @@ def save_diagnostic_card(data_h_orig, data_o_raw_orig,
         plt.close(fig)
         
     except Exception as e:
-        print(f"\n❌ ERRORE PNG: {e}")
+        print(f"\nERRORE PNG: {e}")
 
 # --- WORKER SETUP & JOB ---
 
@@ -305,8 +305,8 @@ def select_target_directory():
     except: return None
 
 def main():
-    print(f"🚀 ESTRAZIONE PATCH WCS-AWARE (FIXED ALIGNMENT)")
-    print(f"   Config: HR={HR_SIZE}px, LR={AI_LR_SIZE}px")
+    print(f"ESTRAZIONE PATCH WCS-AWARE (FIXED ALIGNMENT)")
+    print(f" Config: HR={HR_SIZE}px, LR={AI_LR_SIZE}px")
     
     target_dir = ROOT_DATA_DIR / "M1" 
     if len(sys.argv) > 1: 
@@ -315,7 +315,7 @@ def main():
         sel = select_target_directory()
         if sel: target_dir = sel
     
-    print(f"\n📂 Target selezionato: {target_dir.name}")
+    print(f"\nTarget selezionato: {target_dir.name}")
     
     input_h = target_dir / '3_registered_native' / 'hubble'
     input_o = target_dir / '3_registered_native' / 'observatory'
@@ -332,7 +332,7 @@ def main():
     o_files_all = sorted(list(input_o.glob("*.fits")))
     
     if not h_files or not o_files_all:
-        print("❌ File mancanti in 3_registered_native")
+        print("File mancanti in 3_registered_native")
         return
 
     # Master Hubble
@@ -349,12 +349,12 @@ def main():
         h_center = w_h.wcs.crval
         
     except Exception as e:
-        print(f"❌ Errore lettura Hubble: {e}")
+        print(f"Errore lettura Hubble: {e}")
         return
 
     # Filtro file Osservatorio
     o_files_good = []
-    print(f"   🔍 Filtraggio file non allineati...")
+    print(f"Filtraggio file non allineati...")
     for f in o_files_all:
         try:
             with fits.open(f) as o:
@@ -364,10 +364,10 @@ def main():
                     o_files_good.append(f)
         except: pass
         
-    print(f"   ✅ File validi trovati: {len(o_files_good)}")
+    print(f"File validi trovati: {len(o_files_good)}")
     
     if not o_files_good:
-        print("❌ Nessun file dell'osservatorio è centrato su Hubble.")
+        print("Nessun file dell'osservatorio è centrato su Hubble.")
         return
 
     h_h, h_w = d_h.shape
@@ -376,9 +376,9 @@ def main():
         for x in range(0, h_w - HR_SIZE + 1, STRIDE):
             tasks.append((h_master_path, y, x))
             
-    print(f"   📦 Patch Hubble da processare: {len(tasks)}")
+    print(f"Patch Hubble da processare: {len(tasks)}")
     
-    print(f"\n🚀 Avvio estrazione...")
+    print(f"\nAvvio estrazione...")
     total_saved = 0
     
     with ProcessPoolExecutor(initializer=init_worker,
@@ -387,7 +387,7 @@ def main():
         results = list(tqdm(ex.map(process_single_patch_multi, tasks), total=len(tasks), ncols=100))
         total_saved = sum(results)
         
-    print(f"\n✅ COMPLETATO.")
+    print(f"\nCOMPLETATO.")
     print(f"   Coppie salvate: {total_saved}")
     print(f"   Dataset: {out_fits}")
     print(f"   Validation Images: {out_png}")
@@ -397,12 +397,12 @@ def main():
     
     # Zip del Dataset FITS
     zip_fits_name = target_dir / f"{target_name}_patches"
-    print(f"   🗜️  Creazione ZIP Dataset: {zip_fits_name}.zip")
+    print(f" Creazione ZIP Dataset: {zip_fits_name}.zip")
     shutil.make_archive(str(zip_fits_name), 'zip', str(out_fits))
     
     # Zip dei Debug Visuals
     zip_png_name = target_dir / f"{target_name}_debug_visuals"
-    print(f"   🗜️  Creazione ZIP Debug: {zip_png_name}.zip")
+    print(f" Creazione ZIP Debug: {zip_png_name}.zip")
     shutil.make_archive(str(zip_png_name), 'zip', str(out_png))
     # ===================================================
 

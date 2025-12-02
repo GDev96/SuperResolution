@@ -18,9 +18,9 @@ PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
 ROOT_DATA_DIR = PROJECT_ROOT / "data"
 
 def select_target_directory():
-    print("\n" + "🧩"*35)
+    print("\n" + "="*35)
     print("CONTROLLO ALLINEAMENTO (MODALITÀ MOSAICO)".center(70))
-    print("🧩"*35)
+    print("="*35)
     try:
         subdirs = [d for d in ROOT_DATA_DIR.iterdir() if d.is_dir() and d.name not in ['splits', 'logs']]
     except: return None
@@ -45,7 +45,7 @@ def load_observatory_master(folder_path):
     if not files: return None, None, None
     
     # Usiamo la prima immagine (o uno stack veloce) come riferimento geometrico
-    print(f"   Caricamento Riferimento Osservatorio ({len(files)} files)...")
+    print(f"Caricamento Riferimento Osservatorio ({len(files)} files)...")
     
     stack_data = []
     ref_wcs = None
@@ -75,7 +75,7 @@ def create_hubble_mosaic(folder_path, target_wcs, target_shape):
     files = sorted(list(folder_path.glob('*.fits')) + list(folder_path.glob('*.fit')))
     if not files: return None
 
-    print(f"   Creazione Mosaico Hubble da {len(files)} tasselli...")
+    print(f"Creazione Mosaico Hubble da {len(files)} tasselli...")
     
     # Creiamo una tela vuota con le dimensioni dell'Osservatorio
     mosaic_canvas = np.zeros(target_shape, dtype=np.float32)
@@ -137,17 +137,17 @@ def main():
     # 1. Carica Master Osservatorio (La Tela)
     obs_data, obs_wcs = load_observatory_master(dir_observatory)
     if obs_data is None:
-        print("❌ Dati Osservatorio mancanti.")
+        print("Dati Osservatorio mancanti.")
         return
 
     # 2. Crea Mosaico Hubble sulla tela dell'Osservatorio
     hubble_mosaic = create_hubble_mosaic(dir_hubble, obs_wcs, obs_data.shape)
     if hubble_mosaic is None or np.max(hubble_mosaic) == 0:
-        print("❌ Impossibile creare mosaico Hubble (dati vuoti o WCS errati).")
+        print("Impossibile creare mosaico Hubble (dati vuoti o WCS errati).")
         return
 
     # 3. Normalizzazione
-    print("   Generazione Overlay...")
+    print("Generazione Overlay...")
     img_o = normalize_zscale(obs_data)
     img_h = normalize_zscale(hubble_mosaic)
 
@@ -185,7 +185,7 @@ def main():
 
     out_file = out_dir / f"{target_dir.name}_mosaic_check.png"
     plt.savefig(out_file, dpi=150, bbox_inches='tight', facecolor='black')
-    print(f"\n✅ Controllo completato! Mosaico generato:\n   {out_file}")
+    print(f"\n Controllo completato! Mosaico generato:\n   {out_file}")
 
 if __name__ == "__main__":
     main()

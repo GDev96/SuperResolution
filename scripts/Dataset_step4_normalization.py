@@ -24,9 +24,9 @@ UPPER_PERCENTILE = 98.0 # Taglia le stelle saturate per evidenziare la nebulosa
 DEBUG_SAMPLES = 10 
 
 def select_target_directory():
-    print("\n" + "⚖️"*35)
+    print("\n" + "="*35)
     print("NORMALIZZAZIONE AVANZATA (LOG STRETCH)".center(70))
-    print("⚖️"*35)
+    print("="*35)
     
     subdirs = [d for d in ROOT_DATA_DIR.iterdir() if d.is_dir() and d.name not in ['splits', 'logs']]
     if not subdirs: return None
@@ -39,7 +39,7 @@ def select_target_directory():
             valid_targets.append(d)
             
     if not valid_targets:
-        print("❌ Nessun target ha le patch estratte.")
+        print("Nessun target ha le patch estratte.")
         return None
 
     try:
@@ -119,7 +119,7 @@ def main():
     debug_dir.mkdir(parents=True)
 
     pairs = sorted(list(input_dir.glob("pair_*")))
-    print(f"\n🚀 Normalizzazione LOG/STRETCH su {len(pairs)} coppie...")
+    print(f"\nNormalizzazione LOG/STRETCH su {len(pairs)} coppie...")
     print(f"   Input:  {input_dir}")
     print(f"   Output: {output_dir}")
     print(f"   Debug:  {debug_dir} (Controlla qui le immagini!)")
@@ -162,12 +162,12 @@ def main():
             count += 1
             
         except Exception as e:
-            tqdm.write(f"⚠️ Errore su {pair_folder.name}: {e}")
+            tqdm.write(f"Errore su {pair_folder.name}: {e}")
 
-    print(f"\n✅ DATASET COMPLETATO!")
+    print(f"\nDATASET COMPLETATO!")
     print(f"   Coppie salvate: {count}")
     print(f"   Cartella ZIP non creata automaticamente (risparmio tempo).")
-    print(f"   ⚠️ VAI NELLA CARTELLA '{debug_dir.name}' E CONTROLLA SE VEDI LE NEBULOSE!")
+    print(f" VAI NELLA CARTELLA '{debug_dir.name}' E CONTROLLA SE VEDI LE NEBULOSE!")
 
 if __name__ == "__main__":
     main()

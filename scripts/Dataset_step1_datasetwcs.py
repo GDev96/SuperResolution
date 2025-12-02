@@ -23,7 +23,7 @@ try:
     REPROJECT_AVAILABLE = True
 except ImportError:
     REPROJECT_AVAILABLE = False
-    print("⚠️ Libreria 'reproject' non trovata. La registrazione fallirà.")
+    print("Libreria 'reproject' non trovata. La registrazione fallirà.")
 
 warnings.filterwarnings('ignore')
 
@@ -71,9 +71,9 @@ def find_astap_path():
     return None
 
 def select_target_directory():
-    print("\n" + "🔭"*35)
+    print("\n" + "="*35)
     print("PIPELINE REGISTRAZIONE (FORCED FOV)".center(70))
-    print("🔭"*35)
+    print("="*35)
     try:
         subdirs = [d for d in ROOT_DATA_DIR.iterdir() if d.is_dir() and d.name not in ['splits', 'logs']]
     except: return []
@@ -146,7 +146,7 @@ def solve_with_astap(inp_file, out_file, astap_exe, logger):
             return True
         else:
             with log_lock: 
-                logger.warning(f"❌ FALLITO {inp_file.name}")
+                logger.warning(f"FALLITO {inp_file.name}")
                 # Logghiamo output ASTAP solo se fallisce per debug
                 # logger.warning(f"   ASTAP out: {res.stdout[:200]}...") 
             return False
@@ -162,7 +162,7 @@ def process_step1_folder(inp_dir, out_dir, astap_exe, logger):
     files = sorted(list(set(files)))
     if not files: return 0
 
-    print(f"   Solving {inp_dir.name} ({len(files)} img)...")
+    print(f"Solving {inp_dir.name} ({len(files)} img)...")
     success = 0
     with ThreadPoolExecutor(max_workers=NUM_THREADS) as executor:
         futures = []
@@ -268,14 +268,14 @@ def main():
     ASTAP_PATH = find_astap_path()
     
     if not ASTAP_PATH:
-        print("❌ ERRORE CRITICO: ASTAP non trovato!")
+        print("ERRORE CRITICO: ASTAP non trovato!")
         return
     
     targets = select_target_directory()
     if not targets: return
 
     for BASE_DIR in targets:
-        print(f"\n🚀 ELABORAZIONE: {BASE_DIR.name}")
+        print(f"\n ELABORAZIONE: {BASE_DIR.name}")
         
         in_o = BASE_DIR / '1_originarie/local_raw'
         in_h = BASE_DIR / '1_originarie/img_lights'
@@ -291,14 +291,14 @@ def main():
         s2 = process_step1_folder(in_h, out_solved_h, ASTAP_PATH, logger)
         
         if s1+s2 == 0:
-            print("   ❌ Nessun file risolto. Controlla il FOV in ASTAP.")
+            print("Nessun file risolto. Controlla il FOV in ASTAP.")
             continue
 
         print("   [2/2] Registrazione e Riproiezione...")
         if main_registration(out_solved_h, out_solved_o, out_reg_h, out_reg_o, logger):
-            print("   ✅ Pipeline Completata.")
+            print("Pipeline Completata.")
         else:
-            print("   ❌ Errore Registrazione.")
+            print("Errore Registrazione.")
 
 if __name__ == "__main__":
     main()

@@ -7,6 +7,8 @@ __pycache__/
 .ipynb_checkpoints
 .DS_Store
 *.log
+.env
+*.zip
 
 # === DATI ELABORATI (Auto-generati) ===
 data/
