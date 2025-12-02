@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import warnings
 from pathlib import Path
+from astropy.wcs import WCS, FITSFixedWarning
 import subprocess
 import shutil
 
