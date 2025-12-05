@@ -112,6 +112,14 @@ git clone <repository-url>
 cd SuperResolution
 ```
 
+#### Creazione e attivazione venv
+
+# Crea il virtual environment
+python -m venv venv
+
+# Attiva l'ambiente
+.\venv\Scripts\Activate.ps1
+
 ### 2. Installazione Modelli Esterni
 
 I modelli BasicSR e HAT devono essere clonati nella cartella `models/`:

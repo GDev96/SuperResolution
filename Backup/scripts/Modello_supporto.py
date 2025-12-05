@@ -3,7 +3,6 @@ import argparse
 import sys
 import json
 import torch
-import torch.nn as nn  # --- MODIFICA: Import aggiunto per DataParallel
 import torch.optim as optim
 import torchvision.utils as vutils
 from torch.utils.data import DataLoader
@@ -24,25 +23,16 @@ except ImportError:
     print("❌ Errore Import src.")
     sys.exit(1)
 
-# --- MODIFICA: Parametri calibrati per 2 GPU ---
-BATCH_SIZE = 6          # 3 immagini x 2 GPU
-ACCUM_STEPS = 10        # Ridotto da 20 perché il batch reale è raddoppiato
-# -----------------------------------------------
+BATCH_SIZE = 3          
+ACCUM_STEPS = 20        
 LR = 4e-4
 TOTAL_EPOCHS = 150
 LOG_INTERVAL = 1        
 IMAGE_INTERVAL = 1      
 
 def train_worker(args):
-    # Rilevamento device
-    if torch.cuda.is_available():
-        device = torch.device('cuda:0')
-        gpu_count = torch.cuda.device_count()
-        print(f"✅ Training avviato su {gpu_count} GPU (CUDA Visible Devices).")
-    else:
-        sys.exit("❌ Nessuna GPU rilevata.")
-
-    target_name = f"{args.target}_DUAL_GPU"
+    device = torch.device('cuda:0')
+    target_name = f"{args.target}_GPU_0"
     
     out_dir = PROJECT_ROOT / "outputs" / target_name
     save_dir = out_dir / "checkpoints"
@@ -67,24 +57,12 @@ def train_worker(args):
     train_ds = AstronomicalDataset(ft_path, base_path=PROJECT_ROOT, augment=True)
     val_ds = AstronomicalDataset(fv_path, base_path=PROJECT_ROOT, augment=False)
     
-    # --- MODIFICA: Aumentati worker per alimentare 2 GPU ---
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, 
                               num_workers=8, pin_memory=True, prefetch_factor=2, persistent_workers=True)
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=4)
 
     print(f"🚀 Training: {len(train_ds)} campioni.")
-    
-    # Inizializzazione modello su CPU
-    model = HybridSuperResolutionModel(smoothing='balanced', device='cpu')
-    
-    # --- MODIFICA: Configurazione Multi-GPU ---
-    if gpu_count > 1:
-        print(f"⚡ Attivazione DataParallel su {gpu_count} GPU.")
-        model = nn.DataParallel(model)
-    
-    model = model.to(device)
-    # ------------------------------------------
-
+    model = HybridSuperResolutionModel(smoothing='balanced', device=device).to(device)
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=TOTAL_EPOCHS, eta_min=1e-7)
     criterion = CombinedLoss().to(device)
@@ -139,7 +117,6 @@ def train_worker(args):
             writer.add_scalar('Train/Loss_Perceptual', acc_perc / steps, epoch)
             writer.add_scalar('Train/Learning_Rate', current_lr, epoch)
             
-            # Validation
             model.eval()
             metrics = Metrics()
             
@@ -159,15 +136,10 @@ def train_worker(args):
             
             tqdm.write(f"📊 EP {epoch} | PSNR: {res['psnr']:.2f} | Astro Loss: {(acc_astro/steps):.4f}")
 
-            # --- MODIFICA: Logica salvataggio pesi compatibile con DataParallel ---
-            # Estraiamo il modello "reale" da dentro il wrapper DataParallel (.module)
-            model_to_save = model.module if gpu_count > 1 else model
-
             if res['psnr'] > best_psnr:
                 best_psnr = res['psnr']
-                torch.save(model_to_save.state_dict(), save_dir / "best_model.pth")
-            torch.save(model_to_save.state_dict(), save_dir / "last.pth")
-            # --------------------------------------------------------------------
+                torch.save(model.state_dict(), save_dir / "best_model.pth")
+            torch.save(model.state_dict(), save_dir / "last.pth")
 
             if epoch % IMAGE_INTERVAL == 0:
                 v_lr_up = torch.nn.functional.interpolate(v_lr, size=(512,512))

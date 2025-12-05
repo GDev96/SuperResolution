@@ -58,17 +58,42 @@ def setup_logging():
     return logging.getLogger(__name__)
 
 def find_astap_path():
-    possible_paths = [
-        r"C:\Program Files\astap\astap.exe",
-        r"C:\Program Files (x86)\astap\astap.exe",
-        r"D:\astap\astap.exe",
-        r"F:\astap\astap.exe",
-        r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\ASTAP\astap.exe"
-    ]
+    """
+    Trova l'eseguibile di ASTAP in modo Cross-Platform (Windows/Linux)
+    """
+    possible_paths = []
+
+    # 1. Definizione percorsi in base all'OS
+    if sys.platform == 'win32':
+        possible_paths = [
+            r"C:\Program Files\astap\astap.exe",
+            r"C:\Program Files (x86)\astap\astap.exe",
+            r"D:\astap\astap.exe",
+            r"F:\astap\astap.exe",
+            r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\ASTAP\astap.exe"
+        ]
+    else:
+        # Percorsi standard Linux/Mac
+        possible_paths = [
+            "/opt/astap/astap",
+            "/usr/bin/astap",
+            "/usr/local/bin/astap"
+        ]
+
+    # 2. Controllo esistenza fisica
     for path in possible_paths:
-        if os.path.isfile(path): return path
+        if os.path.isfile(path):
+            # Su Linux verifichiamo anche i permessi di esecuzione
+            if sys.platform != 'win32':
+                if os.access(path, os.X_OK):
+                    return path
+            else:
+                return path
+
+    # 3. Fallback sul PATH di sistema
     sys_path = shutil.which("astap")
     if sys_path: return sys_path
+    
     return None
 
 def select_target_directory():
@@ -90,11 +115,22 @@ def select_target_directory():
 # ================= STEP 1: ASTAP SOLVING =================
 
 def run_astap_cmd(cmd, logger):
+    """
+    Esegue il comando ASTAP gestendo le differenze tra Windows (startupinfo) e Linux.
+    """
     startupinfo = None
+    
+    # startupinfo esiste solo su Windows
     if sys.platform == 'win32':
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    return subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo)
+    
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo)
+    except Exception as e:
+        logger.error(f"Errore esecuzione comando ASTAP: {e}")
+        # Ritorna un oggetto dummy in caso di errore critico del subprocess
+        return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr=str(e))
 
 def solve_with_astap(inp_file, out_file, astap_exe, logger):
     try:
@@ -270,6 +306,8 @@ def main():
     
     if not ASTAP_PATH:
         print("ERRORE CRITICO: ASTAP non trovato!")
+        if sys.platform != 'win32':
+            print("SU LINUX: Assicurati che ASTAP sia installato in /opt/astap o /usr/bin")
         return
     
     targets = select_target_directory()

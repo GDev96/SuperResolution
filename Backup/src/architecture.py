@@ -27,7 +27,7 @@ class AntiCheckerboardLayer(nn.Module):
     def forward(self, x): return self.conv(x)
 
 class HybridSuperResolutionModel(nn.Module):
-    def __init__(self, output_size=512, smoothing='balanced', device='cpu'):
+    def __init__(self, output_size=512, smoothing='balanced', device='cuda'):
         super().__init__()
         self.output_size = output_size
         
@@ -78,8 +78,7 @@ class HybridSuperResolutionModel(nn.Module):
         else:
             self.s1 = self.s2 = self.sf = nn.Identity()
             
-        # --- MODIFICA: RIMOSSO self.to(device) per compatibilità DataParallel ---
-        # self.to(device) 
+        self.to(device)
 
     def forward(self, x):
         x = self.stage1(x)
