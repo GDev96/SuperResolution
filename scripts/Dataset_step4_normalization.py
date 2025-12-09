@@ -24,12 +24,12 @@ USE_LOG_STRETCH = True
 # 3.0 = Bilanciato (Consigliato)
 # 5.0 = Nero deciso
 # 15.0 = Molto aggressivo
-BLACK_CLIP_PERCENTILE = 4.0  
+BLACK_CLIP_PERCENTILE = 3.0  
 
 NUM_SAMPLES_PER_IMG = 4000
 BATCH_SIZE = 32
 NUM_WORKERS = 4
-DEBUG_INTERVAL = 10 
+DEBUG_INTERVAL = 50 
 
 # ================= DATASET PYTORCH =================
 class RawFitsDataset(Dataset):

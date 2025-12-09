@@ -15,7 +15,6 @@ from tqdm import tqdm
 # ================= CONFIGURAZIONE PATH =================
 CURRENT_SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_SCRIPT_DIR.parent
-
 sys.path.insert(0, str(PROJECT_ROOT))
 
 try:
@@ -24,249 +23,180 @@ try:
     from src.losses import CombinedLoss
     from src.metrics import Metrics
 except ImportError as e:
-    print(f"\n❌ ERRORE IMPORT: {e}")
-    sys.exit(1)
+    sys.exit(f"❌ Errore Import: {e}")
 
-# ================= HYPERPARAMETERS =================
-# BATCH SIZE: 4 Totali. 
-# Su 2 GPU = 2 immagini per GPU (Molto sicuro).
-BATCH_SIZE = 2        
+# ================= HYPERPARAMETERS SANITY CHECK (LINUX) =================
+BATCH_SIZE = 4        # Se usiamo 2 GPU, 4img/gpu è ok. (Verrà ridotto se dataset=1)
+ACCUM_STEPS = 1       # Update immediato per sanity check
+LR = 5e-4             # Learning rate aggressivo per "svegliare" le stelle
+TOTAL_EPOCHS = 1000
 
-ACCUM_STEPS = 64     
-LR = 2e-4
-TOTAL_EPOCHS = 300
+LOG_INTERVAL = 5     
+IMAGE_INTERVAL = 20  
 
-LOG_INTERVAL =1     
-IMAGE_INTERVAL = 1  
-
-# --- FIX STABILITÀ CUDA ---
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-# Disabilitiamo benchmark per evitare algoritmi conv che usano memoria out-of-bounds
-torch.backends.cudnn.benchmark = False 
-torch.backends.cudnn.deterministic = True
+# Tuning NVIDIA
+torch.backends.cudnn.benchmark = True 
 torch.backends.cuda.matmul.allow_tf32 = True 
 
 def train_worker(args):
-    # 1. Pulizia Memoria
+    # 1. Setup Device
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
-
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     
-    target_name = f"{args.target}_Worker_HAT_Medium"
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    num_gpus = torch.cuda.device_count()
+    
+    print(f"🚀 TRAINING SU LINUX | GPU Rilevate: {num_gpus}")
+    for i in range(num_gpus):
+        print(f"   ✅ GPU {i}: {torch.cuda.get_device_name(i)}")
+    
+    target_name = f"{args.target}_LINUX_STAR_HUNTER"
     
     # 2. Setup Cartelle
     out_dir = PROJECT_ROOT / "outputs" / target_name
     save_dir = out_dir / "checkpoints"
     img_dir = out_dir / "images"
     log_dir = out_dir / "tensorboard"
-    
-    for d in [save_dir, img_dir, log_dir]: 
-        d.mkdir(parents=True, exist_ok=True)
+    for d in [save_dir, img_dir, log_dir]: d.mkdir(parents=True, exist_ok=True)
 
-    # Inizializza Tensorboard
     writer = SummaryWriter(str(log_dir))
 
     # 3. Caricamento Dati
     splits_dir = PROJECT_ROOT / "data" / args.target / "8_dataset_split" / "splits_json"
-    if not splits_dir.exists():
-        sys.exit(f"❌ Splits non trovati in: {splits_dir}")
     
     with open(splits_dir / "train.json") as f: train_data = json.load(f)
     with open(splits_dir / "val.json") as f: val_data = json.load(f)
     
     ft_path = splits_dir / f"temp_train_{os.getpid()}.json"
     fv_path = splits_dir / f"temp_val_{os.getpid()}.json"
-    
     with open(ft_path, 'w') as f: json.dump(train_data, f)
     with open(fv_path, 'w') as f: json.dump(val_data, f)
 
-    train_ds = AstronomicalDataset(ft_path, base_path=PROJECT_ROOT, augment=True)
+    # Dataset - AUGMENT=FALSE PER SANITY CHECK!
+    train_ds = AstronomicalDataset(ft_path, base_path=PROJECT_ROOT, augment=False)
     val_ds = AstronomicalDataset(fv_path, base_path=PROJECT_ROOT, augment=False)
     
+    # Smart Batch Size Logic
+    curr_batch = BATCH_SIZE
+    drop_last = True
+    if len(train_ds) < BATCH_SIZE:
+        curr_batch = len(train_ds)
+        drop_last = False
+        print(f"⚠️ Dataset piccolo ({len(train_ds)} img): Batch ridotto a {curr_batch}")
+
     train_loader = DataLoader(
         train_ds, 
-        batch_size=BATCH_SIZE, 
-        shuffle=True, 
-        num_workers=4,          
-        pin_memory=True, 
-        prefetch_factor=2, 
-        persistent_workers=True,
-        drop_last=True          
+        batch_size=curr_batch, 
+        shuffle=False,            # No shuffle per sanity check
+        num_workers=4,            
+        pin_memory=True,          
+        drop_last=drop_last
     )
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=2)
 
-    print(f"🚀 Training Avviato su {device} (HAT-Medium)")
-    print(f"   Config: Batch={BATCH_SIZE} | Accum={ACCUM_STEPS}")
+    print(f"   🔥 Config: Batch={curr_batch} | Loss=STAR_WEIGHTED (500x) | Augment=FALSE")
     
-    # Inizializzazione Modello
-    model = HybridSuperResolutionModel(smoothing='balanced', device=device).to(device)
+    # 4. Modello Multi-GPU
+    # Smoothing='none' per massima nitidezza sui pixel stellari
+    model = HybridSuperResolutionModel(smoothing='none', device=device).to(device)
     
-    # --- MULTI-GPU SETUP ---
-    num_gpus = torch.cuda.device_count()
     if num_gpus > 1:
-        print(f"   🔥 MULTI-GPU ATTIVO: {num_gpus} GPU in uso.")
+        print(f"   ⚖️  Attivazione DataParallel su {num_gpus} GPU")
         model = nn.DataParallel(model)
-    else:
-        print(f"   ⚠️ Single GPU Mode")
     
-    optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
+    optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=0)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=TOTAL_EPOCHS, eta_min=1e-7)
+    
+    # Loss Cacciatore di Stelle
     criterion = CombinedLoss().to(device)
-
-    # 4. Configurazione AMP
-    try:
-        from torch.amp import GradScaler, autocast
-        scaler = GradScaler('cuda')
-        use_new_amp = True
-        amp_device = 'cuda'
-    except ImportError:
-        scaler = torch.cuda.amp.GradScaler()
-        use_new_amp = False
-        amp_device = None
-
+    
+    scaler = torch.cuda.amp.GradScaler() # FP16 per velocità
     best_psnr = 0.0
 
     # === TRAINING LOOP ===
     for epoch in range(1, TOTAL_EPOCHS + 1):
         model.train()
-        
-        acc_loss_total = 0.0
-        acc_char = 0.0
-        acc_astro = 0.0
-        acc_perc = 0.0
+        acc_loss = 0.0
         
         optimizer.zero_grad()
-        
-        pbar = tqdm(train_loader, desc=f"Ep {epoch}/{TOTAL_EPOCHS}", ncols=120, colour='cyan') 
+        pbar = tqdm(train_loader, desc=f"Ep {epoch}", ncols=100, colour='cyan', leave=False)
         
         for i, batch in enumerate(pbar):
-            # FIX: .contiguous() previene errori di memoria con DataParallel scatter
-            lr = batch['lr'].to(device, non_blocking=True).contiguous()
-            hr = batch['hr'].to(device, non_blocking=True).contiguous()
+            lr = batch['lr'].to(device, non_blocking=True)
+            hr = batch['hr'].to(device, non_blocking=True)
             
-            # --- Forward Pass ---
-            if use_new_amp:
-                with autocast(amp_device):
-                    pred = model(lr)
-                    loss, loss_dict = criterion(pred, hr) 
-                    loss_scaled = loss / ACCUM_STEPS
-            else:
-                with torch.cuda.amp.autocast():
-                    pred = model(lr)
-                    loss, loss_dict = criterion(pred, hr) 
-                    loss_scaled = loss / ACCUM_STEPS
+            with torch.cuda.amp.autocast():
+                pred = model(lr)
+                loss, _ = criterion(pred, hr)
+                loss = loss / ACCUM_STEPS
             
-            # --- Backward Pass ---
-            scaler.scale(loss_scaled).backward()
-            
-            acc_loss_total += loss.item()
-            
-            def get_val(d, k):
-                val = d.get(k, 0.0)
-                return val.item() if hasattr(val, 'item') else val
+            scaler.scale(loss).backward()
+            acc_loss += loss.item() * ACCUM_STEPS
 
-            acc_char += get_val(loss_dict, 'char')
-            acc_astro += get_val(loss_dict, 'astro')
-            acc_perc += get_val(loss_dict, 'perceptual')
-
-            # --- Optimizer Step ---
             if (i + 1) % ACCUM_STEPS == 0:
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5) 
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
-            
-            pbar.set_postfix(loss=f"{loss.item():.4f}")
+                
+            pbar.set_postfix(loss=f"{loss.item()*ACCUM_STEPS:.4f}")
 
-        # Gestione ultimo batch
-        if (i + 1) % ACCUM_STEPS != 0:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+        if len(train_loader) % ACCUM_STEPS != 0:
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
 
         scheduler.step()
         
-        # === LOGGING ===
+        # Validation
         if epoch % LOG_INTERVAL == 0:
-            steps = len(train_loader)
-            current_lr = optimizer.param_groups[0]['lr']
-            
-            writer.add_scalar('Train/Loss_Total', acc_loss_total / steps, epoch)
-            writer.add_scalar('Train/Loss_Components/Charbonnier', acc_char / steps, epoch)
-            writer.add_scalar('Train/Loss_Components/Astro', acc_astro / steps, epoch)
-            writer.add_scalar('Train/Loss_Components/Perceptual', acc_perc / steps, epoch)
-            writer.add_scalar('Train/Learning_Rate', current_lr, epoch)
+            avg_loss = acc_loss / len(train_loader) if len(train_loader) > 0 else 0
+            writer.add_scalar('Train/Loss', avg_loss, epoch)
             
             model.eval()
             metrics = Metrics()
-            
-            with torch.inference_mode():
+            with torch.inference_mode(): 
                 for v_batch in val_loader:
-                    v_lr = v_batch['lr'].to(device).contiguous()
-                    v_hr = v_batch['hr'].to(device).contiguous()
+                    v_lr = v_batch['lr'].to(device)
+                    v_hr = v_batch['hr'].to(device)
                     
-                    if use_new_amp:
-                        with autocast(amp_device): v_pred = model(v_lr)
-                    else:
-                        with torch.cuda.amp.autocast(): v_pred = model(v_lr)
-                        
+                    with torch.cuda.amp.autocast():
+                        v_pred = model(v_lr)
+                    
                     metrics.update(v_pred.float(), v_hr.float())
             
             res = metrics.compute()
             writer.add_scalar('Val/PSNR', res['psnr'], epoch)
-            writer.add_scalar('Val/SSIM', res['ssim'], epoch)
-            writer.flush()
             
-            tqdm.write(f"📊 EP {epoch} | PSNR: {res['psnr']:.2f} | SSIM: {res['ssim']:.4f}")
+            print(f"   Ep {epoch:04d} | Loss: {avg_loss:.4f} | PSNR: {res['psnr']:.2f} dB")
 
             if res['psnr'] > best_psnr:
                 best_psnr = res['psnr']
+                # Gestione salvataggio DataParallel
                 if isinstance(model, nn.DataParallel):
-                    state_dict = model.module.state_dict()
+                    torch.save(model.module.state_dict(), save_dir / "best_model.pth")
                 else:
-                    state_dict = model.state_dict()
-                torch.save(state_dict, save_dir / "best_model.pth")
-                tqdm.write("   🏆 Best Model Saved")
+                    torch.save(model.state_dict(), save_dir / "best_model.pth")
             
             if isinstance(model, nn.DataParallel):
-                state_last = model.module.state_dict()
+                torch.save(model.module.state_dict(), save_dir / "last.pth")
             else:
-                state_last = model.state_dict()
-            torch.save(state_last, save_dir / "last.pth")
+                torch.save(model.state_dict(), save_dir / "last.pth")
 
-            # Preview
             if epoch % IMAGE_INTERVAL == 0:
-                v_lr_up = torch.nn.functional.interpolate(v_lr, size=(512,512), mode='nearest').cpu()
-                v_pred_cpu = v_pred.detach().cpu()
-                v_hr_cpu = v_hr.cpu()
-                comp = torch.cat((v_lr_up, v_pred_cpu, v_hr_cpu), dim=3).clamp(0,1)
-                writer.add_image('Preview', comp[0], epoch)
+                v_lr_up = torch.nn.functional.interpolate(v_lr, size=(512,512), mode='nearest')
+                comp = torch.cat((v_lr_up, v_pred, v_hr), dim=3).clamp(0,1)
                 vutils.save_image(comp, img_dir / f"epoch_{epoch}.png")
-            
-            writer.flush()
 
     try:
         if ft_path.exists(): ft_path.unlink()
         if fv_path.exists(): fv_path.unlink()
     except: pass
-    
-    writer.close()
-    print(f"\n✅ Training Completato. Output: {out_dir}")
+    print(f"\n✅ Finito.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--target', type=str, required=True)
     args = parser.parse_args()
-    
-    try:
-        train_worker(args)
-    except Exception as e:
-        print(f"\n❌ ERRORE WORKER: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+    train_worker(args)

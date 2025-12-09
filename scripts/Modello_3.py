@@ -4,13 +4,10 @@ import os
 from pathlib import Path
 
 # ================= CONFIGURAZIONE PATH =================
-# Posizione corrente: /.../scripts/
 HERE = Path(__file__).resolve().parent
-# Root del progetto: /.../
 PROJECT_ROOT = HERE.parent
 ROOT_DATA_DIR = PROJECT_ROOT / "data"
 
-# Codici Colore per estetica terminale
 class Colors:
     HEADER = '\033[95m'
     BLUE = '\033[94m'
@@ -22,25 +19,21 @@ class Colors:
     BOLD = '\033[1m'
 
 def clear_screen():
-    os.system('cls' if os.name == 'nt' else 'clear')
+    os.system('clear')
 
 def get_available_targets():
-    """Cerca cartelle in data/ che abbiano completato lo step 7."""
     targets = []
     if ROOT_DATA_DIR.exists():
         for d in ROOT_DATA_DIR.iterdir():
             if d.is_dir() and d.name not in ['splits', 'logs', '.ipynb_checkpoints']:
-                # Verifica esistenza marker di completamento step precedente
-                if (d / "7_dataset_ready_LOG").exists():
+                if (d / "7_dataset_ready_LOG").exists() or (d / "7_dataset_ready").exists():
                     targets.append(d.name)
     return sorted(targets)
 
 def select_target():
-    """Menu interattivo selezione dataset."""
     targets = get_available_targets()
     if not targets:
-        print(f"{Colors.FAIL}❌ Nessun target pronto in {ROOT_DATA_DIR}")
-        print(f"   (Assicurati di aver completato la preparazione del dataset){Colors.ENDC}")
+        print(f"{Colors.FAIL}❌ Nessun target pronto in {ROOT_DATA_DIR}{Colors.ENDC}")
         sys.exit(1)
     
     print(f"\n{Colors.HEADER}📂 SELEZIONE TARGET (Dataset Pronti):{Colors.ENDC}")
@@ -58,98 +51,73 @@ def select_target():
             print(f"{Colors.WARNING}Inserisci un numero valido.{Colors.ENDC}")
 
 def select_gpus():
-    """Menu selezione GPU con validazione."""
-    # Nota: Modifica questa lista se hai più o meno GPU fisiche
-    available_gpus = [0, 1, 2, 3]
-    
-    print(f"\n{Colors.HEADER}🖥️  CONFIGURAZIONE GPU{Colors.ENDC}")
-    print(f"   ID Rilevati/Disponibili: {available_gpus}")
-    print(f"{Colors.BLUE}   Esempio: '0,1' per usare le prime due. '0' per la prima.{Colors.ENDC}")
-    print(f"{Colors.BLUE}   Lascia vuoto per default (GPU 0).{Colors.ENDC}")
+    """Menu selezione GPU per Linux (Multi-GPU)."""
+    print(f"\n{Colors.HEADER}🖥️  CONFIGURAZIONE GPU (NVIDIA RTX 5000){Colors.ENDC}")
+    print(f"{Colors.BLUE}   Esempi:{Colors.ENDC}")
+    print(f"   '0,1' -> Usa entrambe le GPU (Massima Potenza)")
+    print(f"   '0'   -> Usa solo la prima")
+    print(f"   '1'   -> Usa solo la seconda")
 
     while True:
-        selection = input(f"\n{Colors.BOLD}Quali GPU usare? > {Colors.ENDC}").strip()
+        selection = input(f"\n{Colors.BOLD}Quali GPU usare? [0,1] > {Colors.ENDC}").strip()
         
         if selection == "":
-            return "0", 1 
+            selection = "0,1" # Default entrambe
             
-        try:
-            # Pulisce l'input e crea lista di int
-            selected_ids = [int(x.strip()) for x in selection.split(',') if x.strip().isdigit()]
+        # Validazione semplice
+        valid_chars = set("0123456789,")
+        if not all(c in valid_chars for c in selection):
+            print(f"{Colors.FAIL}❌ Input non valido.{Colors.ENDC}")
+            continue
             
-            if not selected_ids:
-                print(f"{Colors.WARNING}Nessun ID valido inserito.{Colors.ENDC}")
-                continue
-                
-            # Verifica esistenza fisica (simulata dalla lista available_gpus)
-            invalid = [x for x in selected_ids if x not in available_gpus]
-            if invalid:
-                print(f"{Colors.FAIL}❌ ID GPU inesistenti: {invalid}{Colors.ENDC}")
-                continue
-            
-            # Rimuove duplicati e ordina
-            selected_ids = sorted(list(set(selected_ids)))
-            cuda_str = ",".join(map(str, selected_ids))
-            return cuda_str, len(selected_ids)
-            
-        except Exception as e:
-            print(f"{Colors.FAIL}Errore input: {e}{Colors.ENDC}")
+        return selection
 
 def main():
     clear_screen()
-    print(f"{Colors.HEADER}{Colors.BOLD}🚀 LANCIATORE TRAINING HYBRID SR{Colors.ENDC}")
-    print(f"{Colors.HEADER}===================================={Colors.ENDC}")
+    print(f"{Colors.HEADER}{Colors.BOLD}🚀 LINUX DUAL-GPU SANITY CHECK{Colors.ENDC}")
+    print(f"{Colors.HEADER}=============================={Colors.ENDC}")
 
     target_name = select_target()
-    gpu_str, num_gpus = select_gpus()
+    gpu_str = select_gpus()
+    
+    num_gpus = len(gpu_str.split(','))
     
     print(f"\n{Colors.GREEN}✅ RIEPILOGO AVVIO:{Colors.ENDC}")
     print(f"   🎯 Target:     {Colors.BOLD}{target_name}{Colors.ENDC}")
     print(f"   🖥️  GPU IDs:    {Colors.BOLD}{gpu_str}{Colors.ENDC} (Totale: {num_gpus})")
-    print(f"   📂 Root Proj:  {PROJECT_ROOT}")
     
     input(f"\nPremi {Colors.BOLD}[INVIO]{Colors.ENDC} per avviare il Worker...")
 
-    # --- CONFIGURAZIONE AMBIENTE ---
+    # --- CONFIGURAZIONE AMBIENTE LINUX ---
     env = os.environ.copy()
-    
-    # Aggiunge la root al PYTHONPATH per permettere 'import src...'
     env["PYTHONPATH"] = f"{PROJECT_ROOT}:{env.get('PYTHONPATH', '')}"
     
-    # Ottimizzazione allocazione memoria CUDNN/PyTorch
-    env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-    
-    # Visibilità GPU
+    # Configurazione CUDA
     env["CUDA_VISIBLE_DEVICES"] = gpu_str
     
-    # Script da lanciare
+    # Ottimizzazione PyTorch per RTX 5000
+    env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+    
     worker_script = HERE / "Modello_supporto.py"
     
     if not worker_script.exists():
-        print(f"\n{Colors.FAIL}❌ ERRORE CRITICO: File non trovato: {worker_script}{Colors.ENDC}")
+        print(f"\n{Colors.FAIL}❌ File non trovato: {worker_script}{Colors.ENDC}")
         sys.exit(1)
 
-    # Usa l'eseguibile Python del venv attivo (se disponibile)
-    python_exe = os.environ.get('VIRTUAL_ENV')
-    if python_exe:
-        python_exe = os.path.join(python_exe, 'bin', 'python')
-    else:
-        python_exe = sys.executable
-    
-    cmd = [python_exe, str(worker_script), "--target", target_name]
+    # Usa l'eseguibile Python corrente
+    cmd = [sys.executable, str(worker_script), "--target", target_name]
 
     print(f"\n{Colors.CYAN}⚡ Avvio sottoprocesso Python...{Colors.ENDC}\n")
     print("-" * 50)
     
     try:
-        # Esegue il worker e attende la fine
         p = subprocess.Popen(cmd, env=env)
         p.wait()
     except KeyboardInterrupt:
-        print(f"\n\n{Colors.WARNING}🛑 Interrotto dall'utente (Launcher).{Colors.ENDC}")
+        print(f"\n\n{Colors.WARNING}🛑 Interrotto.{Colors.ENDC}")
         p.terminate()
     except Exception as e:
-        print(f"\n{Colors.FAIL}❌ Errore critico nel launcher: {e}{Colors.ENDC}")
+        print(f"\n{Colors.FAIL}❌ Errore: {e}{Colors.ENDC}")
 
 if __name__ == "__main__":
     main()
